@@ -14,6 +14,7 @@ use tracing::{error, warn};
 
 mod call_bar;
 mod call_row;
+mod call_video;
 mod divider_row;
 mod event_actions;
 mod event_row;

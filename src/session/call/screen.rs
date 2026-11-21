@@ -19,6 +19,8 @@ use livekit::webrtc::{
 use tokio::sync::oneshot;
 use tracing::{debug, warn};
 
+use super::video::VideoSink;
+
 /// The largest size we send, to keep encoding cheap.
 const MAX_SIZE: (f64, f64) = (1920.0, 1080.0);
 
@@ -152,7 +154,7 @@ impl ScreenCapture {
                     let source = source.clone();
                     move |sink| {
                         let sample = sink.pull_sample().map_err(|_| gst::FlowError::Eos)?;
-                        send_frame(&source, &sample);
+                        send_frame(&source, &sample, None);
                         Ok(gst::FlowSuccess::Ok)
                     }
                 })
@@ -233,8 +235,12 @@ fn scaled_size(size: Option<(i32, i32)>) -> (u32, u32) {
     (even(width), even(height))
 }
 
-/// Copy an I420 sample to the video source.
-fn send_frame(source: &NativeVideoSource, sample: &gst::Sample) {
+/// Copy an I420 sample to the video source, and to the preview if any.
+pub(super) fn send_frame(
+    source: &NativeVideoSource,
+    sample: &gst::Sample,
+    preview: Option<&VideoSink>,
+) {
     let (Some(buffer), Some(caps)) = (sample.buffer(), sample.caps()) else {
         return;
     };
@@ -272,6 +278,9 @@ fn send_frame(source: &NativeVideoSource, sample: &gst::Sample) {
         );
     }
 
+    if let Some(preview) = preview {
+        preview.push_i420(&i420);
+    }
     let frame = VideoFrame {
         rotation: VideoRotation::VideoRotation0,
         timestamp_us: gtk::glib::monotonic_time(),

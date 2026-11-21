@@ -3,6 +3,7 @@ use gettextrs::gettext;
 use gtk::{gio, glib, glib::clone};
 use tracing::warn;
 
+use super::call_video;
 use crate::{
     gettext_f, ngettext_f,
     session::{AudioApp, Call, CallState, Room, Session, ShareAudio, playing_apps},
@@ -10,7 +11,10 @@ use crate::{
 };
 
 mod imp {
-    use std::cell::{OnceCell, RefCell};
+    use std::{
+        cell::{OnceCell, RefCell},
+        collections::HashMap,
+    };
 
     use super::*;
 
@@ -23,8 +27,15 @@ mod imp {
         revealer: OnceCell<gtk::Revealer>,
         status: OnceCell<gtk::Label>,
         mute_button: OnceCell<gtk::ToggleButton>,
+        camera_button: OnceCell<gtk::Button>,
         share_button: OnceCell<gtk::Button>,
         action_button: OnceCell<gtk::Button>,
+        videos_revealer: OnceCell<gtk::Revealer>,
+        videos_box: OnceCell<gtk::Box>,
+        /// The video tiles we show, by video ID.
+        tiles: RefCell<HashMap<String, gtk::Widget>>,
+        /// The windows showing a video big, by video ID.
+        windows: RefCell<HashMap<String, gtk::Window>>,
         /// The session we watch, with its handler.
         session: RefCell<Option<(Session, glib::SignalHandlerId)>>,
         /// The room handler.
@@ -68,6 +79,15 @@ mod imp {
                     button.set_tooltip_text(Some(&gettext("Mute")));
                 }
             });
+            let camera_button = gtk::Button::builder()
+                .icon_name("camera-web-symbolic")
+                .valign(gtk::Align::Center)
+                .build();
+            camera_button.connect_clicked(clone!(
+                #[weak(rename_to = imp)]
+                self,
+                move |_| imp.toggle_camera()
+            ));
             let share_button = gtk::Button::builder()
                 .icon_name("screen-shared-symbolic")
                 .valign(gtk::Align::Center)
@@ -94,12 +114,33 @@ mod imp {
             content.append(&icon);
             content.append(&status);
             content.append(&mute_button);
+            content.append(&camera_button);
             content.append(&share_button);
             content.append(&action_button);
 
+            let videos_box = gtk::Box::builder()
+                .spacing(6)
+                .margin_start(12)
+                .margin_end(12)
+                .margin_bottom(6)
+                .build();
+            let videos_scroll = gtk::ScrolledWindow::builder()
+                .vscrollbar_policy(gtk::PolicyType::Never)
+                .propagate_natural_height(true)
+                .child(&videos_box)
+                .build();
+            let videos_revealer = gtk::Revealer::builder()
+                .transition_type(gtk::RevealerTransitionType::SlideDown)
+                .child(&videos_scroll)
+                .build();
+
+            let bar = gtk::Box::new(gtk::Orientation::Vertical, 0);
+            bar.append(&content);
+            bar.append(&videos_revealer);
+
             let revealer = gtk::Revealer::builder()
                 .transition_type(gtk::RevealerTransitionType::SlideDown)
-                .child(&content)
+                .child(&bar)
                 .build();
             obj.set_child(Some(&revealer));
             obj.add_css_class("toolbar");
@@ -107,8 +148,11 @@ mod imp {
             self.revealer.set(revealer).unwrap();
             self.status.set(status).unwrap();
             self.mute_button.set(mute_button).unwrap();
+            self.camera_button.set(camera_button).unwrap();
             self.share_button.set(share_button).unwrap();
             self.action_button.set(action_button).unwrap();
+            self.videos_revealer.set(videos_revealer).unwrap();
+            self.videos_box.set(videos_box).unwrap();
             self.update();
         }
 
@@ -198,6 +242,8 @@ mod imp {
                     "speaking",
                     "sharing-screen",
                     "starting-screen-share",
+                    "camera-on",
+                    "starting-camera",
                 ]
                 .into_iter()
                 .map(|property| {
@@ -211,6 +257,19 @@ mod imp {
                     )
                 })
                 .collect::<Vec<_>>();
+                handlers.push(call.connect_videos_changed(clone!(
+                    #[weak(rename_to = imp)]
+                    self,
+                    move |_| imp.update_videos()
+                )));
+                handlers.push(call.connect_camera_failed(clone!(
+                    #[weak(rename_to = imp)]
+                    self,
+                    move |_, error| {
+                        let obj = imp.obj();
+                        toast!(obj, gettext_f("Camera: {error}", &[("error", &error)]));
+                    }
+                )));
                 handlers.push(call.connect_screen_share_failed(clone!(
                     #[weak(rename_to = imp)]
                     self,
@@ -232,6 +291,97 @@ mod imp {
                 }
                 self.call.replace(Some((call, handlers)));
             }
+            self.update_videos();
+        }
+
+        /// Show the current videos of the call.
+        fn update_videos(&self) {
+            let (Some(videos_box), Some(videos_revealer)) =
+                (self.videos_box.get(), self.videos_revealer.get())
+            else {
+                return;
+            };
+            let call = self.call.borrow().as_ref().map(|(call, _)| call.clone());
+            let room = self.room.borrow().clone();
+            let videos = match (&call, &room) {
+                (Some(call), Some(_)) => call.videos(),
+                _ => Vec::new(),
+            };
+
+            // Remove the tiles and windows of videos that are gone.
+            let ids = videos
+                .iter()
+                .map(|video| video.id.clone())
+                .collect::<std::collections::HashSet<_>>();
+            self.tiles.borrow_mut().retain(|id, tile| {
+                let keep = ids.contains(id);
+                if !keep {
+                    videos_box.remove(tile);
+                }
+                keep
+            });
+            // Closing a window removes it from the map, so don't hold the map.
+            let closed = self
+                .windows
+                .borrow()
+                .iter()
+                .filter(|(id, _)| !ids.contains(*id))
+                .map(|(_, window)| window.clone())
+                .collect::<Vec<_>>();
+            for window in closed {
+                window.close();
+            }
+
+            // Add tiles for new videos, keeping the order of the call.
+            let mut previous: Option<gtk::Widget> = None;
+            for video in &videos {
+                let Some(room) = &room else {
+                    break;
+                };
+                let existing = self.tiles.borrow().get(&video.id).cloned();
+                let tile = existing.unwrap_or_else(|| {
+                    let title = call_video::video_title(room, video);
+                    let new_tile = call_video::tile(&title, video, {
+                        let video = video.clone();
+                        let title = title.clone();
+                        clone!(
+                            #[weak(rename_to = imp)]
+                            self,
+                            move || imp.open_video(&title, &video)
+                        )
+                    });
+                    videos_box.append(&new_tile);
+                    self.tiles
+                        .borrow_mut()
+                        .insert(video.id.clone(), new_tile.clone());
+                    new_tile
+                });
+                videos_box.reorder_child_after(&tile, previous.as_ref());
+                previous = Some(tile);
+            }
+            videos_revealer.set_reveal_child(!videos.is_empty());
+        }
+
+        /// Show a video big in its own window, or raise its window.
+        fn open_video(&self, title: &str, video: &crate::session::Video) {
+            if let Some(window) = self.windows.borrow().get(&video.id) {
+                window.present();
+                return;
+            }
+            let obj = self.obj();
+            let window = call_video::open_window(obj.upcast_ref(), title, video);
+            let id = video.id.clone();
+            window.connect_close_request(clone!(
+                #[weak(rename_to = imp)]
+                self,
+                #[upgrade_or]
+                glib::Propagation::Proceed,
+                move |_| {
+                    imp.windows.borrow_mut().remove(&id);
+                    glib::Propagation::Proceed
+                }
+            ));
+            self.windows.borrow_mut().insert(video.id.clone(), window);
         }
 
         /// Join or leave the call.
@@ -246,6 +396,13 @@ mod imp {
                 session.leave_call();
             } else {
                 session.join_call(&room);
+            }
+        }
+
+        /// Turn the camera on or off.
+        fn toggle_camera(&self) {
+            if let Some(call) = self.call.borrow().as_ref().map(|(call, _)| call.clone()) {
+                call.set_camera(!call.camera_on());
             }
         }
 
@@ -357,12 +514,14 @@ mod imp {
                 Some(revealer),
                 Some(status),
                 Some(mute_button),
+                Some(camera_button),
                 Some(share_button),
                 Some(action_button),
             ) = (
                 self.revealer.get(),
                 self.status.get(),
                 self.mute_button.get(),
+                self.camera_button.get(),
                 self.share_button.get(),
                 self.action_button.get(),
             )
@@ -400,6 +559,15 @@ mod imp {
                 };
                 status.set_label(&text);
                 mute_button.set_visible(true);
+                camera_button.set_visible(call.state() == CallState::Connected);
+                camera_button.set_sensitive(!call.starting_camera());
+                if call.camera_on() {
+                    camera_button.set_tooltip_text(Some(&gettext("Turn Off Camera")));
+                    camera_button.add_css_class("accent");
+                } else {
+                    camera_button.set_tooltip_text(Some(&gettext("Turn On Camera")));
+                    camera_button.remove_css_class("accent");
+                }
                 share_button.set_visible(call.state() == CallState::Connected);
                 share_button.set_sensitive(!call.starting_screen_share());
                 if call.sharing_screen() {
@@ -435,6 +603,7 @@ mod imp {
                 &[("n", &count.to_string())],
             ));
             mute_button.set_visible(false);
+            camera_button.set_visible(false);
             share_button.set_visible(false);
             action_button.set_icon_name("call-start-symbolic");
             action_button.set_tooltip_text(Some(&gettext("Join Call")));

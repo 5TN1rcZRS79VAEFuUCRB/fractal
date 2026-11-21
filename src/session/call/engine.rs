@@ -37,8 +37,10 @@ use tracing::{debug, info, warn};
 
 use super::{
     app_audio::{self, AppAudioCapture, ShareAudio},
+    camera::{CameraCapture, CameraError},
     rtc::{self, CALL_KEYS_EVENT_TYPE, DELAYED_LEAVE_RESTART, MediaKey, Membership, RtcError},
     screen::{ScreenCapture, ScreenError},
+    video::{self, Video, VideoKind, VideoSink},
 };
 
 /// How long to wait before using a new media key, so other participants
@@ -55,6 +57,8 @@ pub(super) enum Command {
     StartScreenShare(ShareAudio),
     /// Stop sharing the screen.
     StopScreenShare,
+    /// Turn the camera on or off.
+    SetCamera(bool),
     /// Leave the call.
     Leave,
 }
@@ -70,6 +74,12 @@ pub(super) enum Update {
     ScreenShare(bool),
     /// Sharing the screen, or its sound, failed.
     ScreenShareFailed(String),
+    /// Whether our camera is on changed.
+    Camera(bool),
+    /// Turning the camera on failed.
+    CameraFailed(String),
+    /// The videos in the call changed.
+    Videos(Vec<Video>),
     /// The call ended, with an error message if it failed.
     Ended(Option<String>),
 }
@@ -179,6 +189,23 @@ struct CallTask {
     screen: Option<ScreenShare>,
     /// Resolves when the screen capture stops by itself.
     screen_ended: Option<oneshot::Receiver<()>>,
+    /// The videos of other participants, by track ID.
+    remote_videos: HashMap<String, RemoteVideo>,
+    /// The camera being turned on.
+    camera_request: Option<JoinHandle<Result<CameraCapture, CameraError>>>,
+    /// Our camera, with the track we published for it.
+    camera: Option<(CameraCapture, TrackSid)>,
+    /// Resolves when the camera capture stops by itself.
+    camera_ended: Option<oneshot::Receiver<()>>,
+}
+
+/// A video of another participant.
+struct RemoteVideo {
+    video: Video,
+    /// Whether the sender turned it off for now.
+    muted: bool,
+    /// The task copying its frames.
+    task: JoinHandle<()>,
 }
 
 /// A screen we are sharing.
@@ -327,10 +354,15 @@ impl CallTask {
             share_request: None,
             screen: None,
             screen_ended: None,
+            remote_videos: HashMap::new(),
+            camera_request: None,
+            camera: None,
+            camera_ended: None,
         })
     }
 
     /// Run the call until it is left or fails.
+    #[allow(clippy::too_many_lines)]
     async fn run(
         &mut self,
         commands: &mut mpsc::UnboundedReceiver<Command>,
@@ -360,6 +392,17 @@ impl CallTask {
                         self.stop_screen_share().await;
                         let _ = updates.send(Update::ScreenShare(false));
                     }
+                    Some(Command::SetCamera(true)) => {
+                        if self.camera.is_none() && self.camera_request.is_none() {
+                            self.camera_request = Some(tokio::spawn(CameraCapture::start()));
+                        }
+                    }
+                    Some(Command::SetCamera(false)) => {
+                        if let Some(request) = self.camera_request.take() {
+                            request.abort();
+                        }
+                        self.stop_camera(updates).await;
+                    }
                     Some(Command::Leave) | None => return Ok(()),
                 },
                 event = self.livekit_events.recv() => match event {
@@ -376,12 +419,27 @@ impl CallTask {
                     Some(RoomEvent::ParticipantDisconnected(participant)) => {
                         debug!("LiveKit participant disconnected: {}", participant.identity());
                     }
-                    Some(RoomEvent::TrackSubscribed { publication, participant, .. }) => {
+                    Some(RoomEvent::TrackSubscribed { track, publication, participant }) => {
                         debug!(
                             "Subscribed to {:?} track of {}",
                             publication.source(),
                             participant.identity()
                         );
+                        if let RemoteTrack::Video(track) = track {
+                            self.add_remote_video(&track, &publication, &participant, updates);
+                        }
+                    }
+                    Some(RoomEvent::TrackUnsubscribed { publication, .. }) => {
+                        if let Some(video) = self.remote_videos.remove(&publication.sid().to_string()) {
+                            video.task.abort();
+                            self.send_videos(updates);
+                        }
+                    }
+                    Some(RoomEvent::TrackMuted { publication, .. }) => {
+                        self.set_video_muted(&publication.sid(), true, updates);
+                    }
+                    Some(RoomEvent::TrackUnmuted { publication, .. }) => {
+                        self.set_video_muted(&publication.sid(), false, updates);
                     }
                     Some(RoomEvent::TrackSubscriptionFailed { participant, error, .. }) => {
                         warn!("Could not subscribe to track of {}: {error}", participant.identity());
@@ -412,7 +470,12 @@ impl CallTask {
                         self.start_screen_share(result, audio, updates).await;
                     }
                 }
-                () = screen_ended(&mut self.screen_ended) => {
+                result = finished(&mut self.camera_request), if self.camera_request.is_some() => {
+                    self.camera_request = None;
+                    self.start_camera(result, updates).await;
+                }
+                () = capture_ended(&mut self.camera_ended) => self.stop_camera(updates).await,
+                () = capture_ended(&mut self.screen_ended) => {
                     self.stop_screen_share().await;
                     let _ = updates.send(Update::ScreenShare(false));
                 }
@@ -716,6 +779,172 @@ impl CallTask {
         debug!("Stopped sharing the screen");
     }
 
+    /// Publish the camera, once it is on.
+    async fn start_camera(
+        &mut self,
+        result: Result<Result<CameraCapture, CameraError>, JoinError>,
+        updates: &mpsc::UnboundedSender<Update>,
+    ) {
+        let mut capture = match result {
+            Ok(Ok(capture)) => capture,
+            Ok(Err(error)) => {
+                warn!("Could not turn on camera: {error}");
+                let _ = updates.send(Update::CameraFailed(error.to_string()));
+                return;
+            }
+            Err(error) => {
+                if !error.is_cancelled() {
+                    warn!("Camera request crashed: {error}");
+                    let _ = updates.send(Update::CameraFailed(error.to_string()));
+                }
+                return;
+            }
+        };
+
+        let track = LocalVideoTrack::create_video_track(
+            "camera",
+            RtcVideoSource::Native(capture.source.clone()),
+        );
+        let options = TrackPublishOptions {
+            source: TrackSource::Camera,
+            video_codec: VideoCodec::VP8,
+            simulcast: true,
+            video_encoding: Some(VideoEncoding {
+                max_bitrate: 1_700_000,
+                max_framerate: 30.0,
+            }),
+            ..Default::default()
+        };
+        match self
+            .livekit
+            .local_participant()
+            .publish_track(LocalTrack::Video(track), options)
+            .await
+        {
+            Ok(publication) => {
+                self.camera_ended = capture.ended.take();
+                self.camera = Some((capture, publication.sid()));
+                self.sync_key_index();
+                let _ = updates.send(Update::Camera(true));
+                self.send_videos(updates);
+            }
+            Err(error) => {
+                warn!("Could not publish camera: {error}");
+                capture.stop();
+                let _ = updates.send(Update::CameraFailed(error.to_string()));
+            }
+        }
+    }
+
+    /// Turn off the camera, if it is on.
+    async fn stop_camera(&mut self, updates: &mpsc::UnboundedSender<Update>) {
+        self.camera_ended = None;
+        if let Some((capture, sid)) = self.camera.take() {
+            if let Err(error) = self.livekit.local_participant().unpublish_track(&sid).await {
+                debug!("Could not unpublish camera: {error}");
+            }
+            capture.stop();
+            debug!("Turned off the camera");
+            self.send_videos(updates);
+        }
+        let _ = updates.send(Update::Camera(false));
+    }
+
+    /// Show a video track of another participant.
+    fn add_remote_video(
+        &mut self,
+        track: &RemoteVideoTrack,
+        publication: &RemoteTrackPublication,
+        participant: &RemoteParticipant,
+        updates: &mpsc::UnboundedSender<Update>,
+    ) {
+        let identity = participant.identity().to_string();
+        let user_id = self
+            .memberships
+            .iter()
+            .find(|membership| membership.identity == identity)
+            .map(|membership| membership.user_id.clone())
+            .or_else(|| {
+                // Identities are `@user:server:DEVICE`.
+                let (user_id, _) = identity.rsplit_once(':')?;
+                OwnedUserId::try_from(user_id).ok()
+            });
+        let Some(user_id) = user_id else {
+            warn!("Ignoring video of unknown participant {identity}");
+            return;
+        };
+        let kind = match publication.source() {
+            TrackSource::Screenshare => VideoKind::Screen,
+            _ => VideoKind::Camera,
+        };
+        let id = publication.sid().to_string();
+        let sink = VideoSink::default();
+        let task = tokio::spawn(video::receive(track.rtc_track(), sink.clone()));
+        let video = Video {
+            id: id.clone(),
+            user_id,
+            local: false,
+            kind,
+            sink,
+        };
+        if let Some(old) = self.remote_videos.insert(
+            id,
+            RemoteVideo {
+                video,
+                muted: publication.is_muted(),
+                task,
+            },
+        ) {
+            old.task.abort();
+        }
+        self.send_videos(updates);
+    }
+
+    /// Hide or show a video that its sender turned off or on.
+    fn set_video_muted(
+        &mut self,
+        sid: &TrackSid,
+        muted: bool,
+        updates: &mpsc::UnboundedSender<Update>,
+    ) {
+        if let Some(video) = self.remote_videos.get_mut(&sid.to_string())
+            && video.muted != muted
+        {
+            video.muted = muted;
+            self.send_videos(updates);
+        }
+    }
+
+    /// Tell the UI which videos to show.
+    fn send_videos(&self, updates: &mpsc::UnboundedSender<Update>) {
+        let mut videos = self
+            .remote_videos
+            .values()
+            .filter(|video| !video.muted)
+            .map(|video| video.video.clone())
+            .collect::<Vec<_>>();
+        if let (Some((capture, _)), Some(user_id)) = (&self.camera, self.client.user_id()) {
+            videos.push(Video {
+                id: "local-camera".to_owned(),
+                user_id: user_id.to_owned(),
+                local: true,
+                kind: VideoKind::Camera,
+                sink: capture.preview.clone(),
+            });
+        }
+        // Screens first, then others by person, then us, so the order is
+        // stable.
+        videos.sort_by(|a, b| {
+            (a.kind != VideoKind::Screen, a.local, &a.user_id, &a.id).cmp(&(
+                b.kind != VideoKind::Screen,
+                b.local,
+                &b.user_id,
+                &b.id,
+            ))
+        });
+        let _ = updates.send(Update::Videos(videos));
+    }
+
     /// Use a key received from another participant.
     fn add_remote_key(&self, key: MediaKey) {
         let Some(key_provider) = &self.key_provider else {
@@ -773,6 +1002,15 @@ impl CallTask {
             request.abort();
         }
         self.stop_screen_share().await;
+        if let Some(request) = self.camera_request.take() {
+            request.abort();
+        }
+        if let Some((capture, _)) = self.camera.take() {
+            capture.stop();
+        }
+        for (_, video) in self.remote_videos.drain() {
+            video.task.abort();
+        }
         if let Err(error) = self.livekit.close().await {
             debug!("Could not close LiveKit connection: {error}");
         }
@@ -796,8 +1034,16 @@ async fn share_result(
     }
 }
 
-/// Wait until the screen capture stops by itself.
-async fn screen_ended(ended: &mut Option<oneshot::Receiver<()>>) {
+/// Wait for a task to finish.
+async fn finished<T>(handle: &mut Option<JoinHandle<T>>) -> Result<T, JoinError> {
+    match handle {
+        Some(handle) => handle.await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Wait until a capture stops by itself.
+async fn capture_ended(ended: &mut Option<oneshot::Receiver<()>>) {
     let Some(receiver) = ended else {
         return std::future::pending().await;
     };

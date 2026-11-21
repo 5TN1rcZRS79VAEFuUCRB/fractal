@@ -16,12 +16,17 @@ use tokio::sync::mpsc;
 use tracing::{debug, error};
 
 mod app_audio;
+mod camera;
 mod engine;
 mod rtc;
 mod screen;
+mod video;
 
-pub(crate) use self::app_audio::{AudioApp, ShareAudio, playing_apps};
 use self::engine::{Command, Update};
+pub(crate) use self::{
+    app_audio::{AudioApp, ShareAudio, playing_apps},
+    video::{Video, VideoKind, VideoSink},
+};
 use crate::{prelude::*, session::Room, spawn, spawn_tokio};
 
 /// The state of a call.
@@ -61,12 +66,20 @@ mod imp {
         /// Whether we are sharing our screen.
         #[property(get)]
         sharing_screen: Cell<bool>,
+        /// Whether our camera is on.
+        #[property(get)]
+        camera_on: Cell<bool>,
+        /// Whether we are waiting for the camera to turn on.
+        #[property(get)]
+        starting_camera: Cell<bool>,
         /// Whether we are waiting for the user to choose what to share.
         #[property(get)]
         starting_screen_share: Cell<bool>,
         /// Why the call ended, if it failed.
         #[property(get, nullable)]
         error: RefCell<Option<String>>,
+        /// The videos in the call.
+        pub(super) videos: RefCell<Vec<Video>>,
         /// The channel to send commands to the call task.
         pub(super) commands: RefCell<Option<mpsc::UnboundedSender<Command>>>,
     }
@@ -86,6 +99,12 @@ mod imp {
                     Signal::builder("screen-share-failed")
                         .param_types([String::static_type()])
                         .build(),
+                    // Turning on the camera failed.
+                    Signal::builder("camera-failed")
+                        .param_types([String::static_type()])
+                        .build(),
+                    // The videos in the call changed.
+                    Signal::builder("videos-changed").build(),
                 ]
             });
             SIGNALS.as_ref()
@@ -150,14 +169,38 @@ mod imp {
                     self.set_starting_screen_share(false);
                     obj.emit_by_name::<()>("screen-share-failed", &[&error]);
                 }
+                Update::Camera(on) => {
+                    self.set_starting_camera(false);
+                    if self.camera_on.replace(on) != on {
+                        obj.notify_camera_on();
+                    }
+                }
+                Update::CameraFailed(error) => {
+                    self.set_starting_camera(false);
+                    obj.emit_by_name::<()>("camera-failed", &[&error]);
+                }
+                Update::Videos(videos) => {
+                    self.videos.replace(videos);
+                    obj.emit_by_name::<()>("videos-changed", &[]);
+                }
                 Update::Ended(error) => {
                     self.commands.take();
+                    if !self.videos.take().is_empty() {
+                        obj.emit_by_name::<()>("videos-changed", &[]);
+                    }
                     if error.is_some() {
                         self.error.replace(error);
                         obj.notify_error();
                     }
                     self.set_state(CallState::Ended);
                 }
+            }
+        }
+
+        /// Set whether we are waiting for the camera to turn on.
+        pub(super) fn set_starting_camera(&self, starting: bool) {
+            if self.starting_camera.replace(starting) != starting {
+                self.obj().notify_starting_camera();
             }
         }
 
@@ -251,6 +294,28 @@ impl Call {
         self.imp().send(Command::StopScreenShare);
     }
 
+    /// Turn the camera on or off.
+    pub(crate) fn set_camera(&self, on: bool) {
+        if on && (self.camera_on() || self.starting_camera()) {
+            return;
+        }
+        if self.imp().send(Command::SetCamera(on)) {
+            self.imp().set_starting_camera(on);
+        }
+    }
+
+    /// Connect to the signal emitted when turning on the camera fails.
+    pub(crate) fn connect_camera_failed<F: Fn(&Self, String) + 'static>(
+        &self,
+        f: F,
+    ) -> glib::SignalHandlerId {
+        self.connect_closure(
+            "camera-failed",
+            true,
+            glib::closure_local!(move |obj: Self, error: String| f(&obj, error)),
+        )
+    }
+
     /// Connect to the signal emitted when sharing the screen fails.
     pub(crate) fn connect_screen_share_failed<F: Fn(&Self, String) + 'static>(
         &self,
@@ -260,6 +325,23 @@ impl Call {
             "screen-share-failed",
             true,
             glib::closure_local!(move |obj: Self, error: String| f(&obj, error)),
+        )
+    }
+
+    /// The videos in the call, screens first.
+    pub(crate) fn videos(&self) -> Vec<Video> {
+        self.imp().videos.borrow().clone()
+    }
+
+    /// Connect to the signal emitted when the videos in the call change.
+    pub(crate) fn connect_videos_changed<F: Fn(&Self) + 'static>(
+        &self,
+        f: F,
+    ) -> glib::SignalHandlerId {
+        self.connect_closure(
+            "videos-changed",
+            true,
+            glib::closure_local!(move |obj: Self| f(&obj)),
         )
     }
 
