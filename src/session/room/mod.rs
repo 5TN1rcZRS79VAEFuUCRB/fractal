@@ -233,6 +233,9 @@ mod imp {
         /// Whether this is a call room as defined by [MSC3417](https://github.com/matrix-org/matrix-spec-proposals/pull/3417)
         #[property(get = Self::is_call)]
         is_call: PhantomData<bool>,
+        /// The number of people in this room's call, or 0 if there is no call.
+        #[property(get)]
+        call_participants_count: Cell<u32>,
     }
 
     #[glib::object_subclass]
@@ -813,6 +816,13 @@ mod imp {
 
         /// Set the number of joined members in the room, according to the
         /// homeserver.
+        /// Set the number of people in this room's call.
+        fn set_call_participants_count(&self, count: u32) {
+            if self.call_participants_count.replace(count) != count {
+                self.obj().notify_call_participants_count();
+            }
+        }
+
         fn set_joined_members_count(&self, count: u64) {
             if self.joined_members_count.get() == count {
                 return;
@@ -1508,6 +1518,13 @@ mod imp {
             self.update_is_marked_unread().await;
             self.update_tombstone();
             self.set_joined_members_count(room_info.joined_members_count());
+            let call_participants = room_info
+                .active_room_call_participants()
+                .into_iter()
+                .collect::<HashSet<_>>();
+            self.set_call_participants_count(
+                u32::try_from(call_participants.len()).unwrap_or(u32::MAX),
+            );
             self.update_is_encrypted().await;
             self.join_rule.update(room_info.join_rule());
             self.update_guests_allowed();

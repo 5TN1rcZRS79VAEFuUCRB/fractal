@@ -29,6 +29,7 @@ codegen-units = 16
 # Please keep dependencies sorted.
 [dependencies]
 as_variant = "1"
+base64 = "0.22"
 blurhash = "0.2"
 eyeball = "0.8"
 futures-channel = "0.3"
@@ -43,6 +44,8 @@ pulldown-cmark = "0.13"
 qrcode = { version = "0.14", default-features = false }
 quick_cache = "0.7"
 rand = "0.10"
+# Only used to pick the process-wide TLS crypto provider, because our dependencies enable several.
+rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"] }
 regex = "1"
 rmp-serde = "1"
 secular = { version = "1", features = ["bmp", "normalization"] }
@@ -81,6 +84,7 @@ default-features = false
 features = [
     "automatic-room-key-forwarding",
     "e2e-encryption",
+    "experimental-send-custom-to-device",
     "markdown",
     "qrcode",
     "rustls-aws-lc-rs",
@@ -117,7 +121,15 @@ features = [
     "html-matrix",
     "markdown",
     "triomphe",
+    "unstable-msc4140",
+    "unstable-msc4195",
 ]
+
+# Voice/video calls (MatrixRTC over LiveKit).
+[dependencies.livekit]
+version = "0.12"
+default-features = false
+features = ["native", "rustls-tls-native-roots"]
 
 # Linux-only dependencies.
 [target.'cfg(target_os = "linux")'.dependencies]

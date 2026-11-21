@@ -63,6 +63,14 @@ template $ContentRoomHistory: Adw.Bin {
         primary: bind template.is-only-view;
         tooltip-text: _("Room Menu");
       }
+
+      [end]
+      Gtk.Button call_button {
+        valign: center;
+        icon-name: "call-start-symbolic";
+        action-name: "room-history.call";
+        tooltip-text: _("Start Call");
+      }
     }
 
     content: Gtk.Box {
@@ -71,6 +79,10 @@ template $ContentRoomHistory: Adw.Bin {
       Adw.Banner {
         title: _("Call room - other clients may not show messages you send in this room.");
         revealed: bind template.timeline as <$Timeline>.room as <$Room>.is-call;
+      }
+
+      $CallBar {
+        room: bind template.timeline as <$Timeline>.room;
       }
 
       $ContentVerificationInfoBar verification_info_bar {

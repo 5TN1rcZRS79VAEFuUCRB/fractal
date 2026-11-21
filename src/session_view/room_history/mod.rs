@@ -12,6 +12,7 @@ use ruma::{
 };
 use tracing::{error, warn};
 
+mod call_bar;
 mod call_row;
 mod divider_row;
 mod event_actions;
@@ -27,6 +28,7 @@ mod typing_row;
 mod verification_info_bar;
 
 use self::{
+    call_bar::CallBar,
     call_row::CallRow,
     divider_row::DividerRow,
     event_actions::*,
@@ -141,6 +143,7 @@ mod imp {
         #[allow(clippy::too_many_lines)]
         fn class_init(klass: &mut Self::Class) {
             VerificationInfoBar::ensure_type();
+            CallBar::ensure_type();
 
             Self::bind_template(klass);
             Self::bind_template_callbacks(klass);
@@ -156,6 +159,10 @@ mod imp {
             });
             klass.install_action_async("room-history.forget", None, |obj, _, _| async move {
                 obj.imp().forget().await;
+            });
+
+            klass.install_action("room-history.call", None, |obj, _, _| {
+                obj.imp().join_call();
             });
 
             klass.install_action("room-history.details", None, |obj, _, _| {
@@ -1000,6 +1007,16 @@ mod imp {
             }
 
             None
+        }
+
+        /// Start or join the call in the room.
+        fn join_call(&self) {
+            let Some(room) = self.room() else {
+                return;
+            };
+            if let Some(session) = room.session() {
+                session.join_call(&room);
+            }
         }
 
         /// Leave the room.

@@ -1,3 +1,20 @@
+> [!NOTE]
+> **This is an unofficial fork of Fractal that adds voice calls.** Please report problems with
+> calls here, not to the Fractal project. Everything else is upstream Fractal.
+>
+> Calls use MatrixRTC with a LiveKit backend, the same system as Element Call, so you can call
+> people who use Element. Status:
+>
+> - ✅ End-to-end encrypted group voice calls in a room: join, mute, leave
+> - 🚧 Camera video
+> - 🚧 Screen sharing, including system and app audio
+>
+> Your homeserver needs a MatrixRTC backend (LiveKit and lk-jwt-service), advertised in its
+> `.well-known/matrix/client` as `org.matrix.msc4143.rtc_foci` or through the
+> `rtc/transports` endpoint. Everyone in a call currently needs to use the same LiveKit backend.
+>
+> Build it like regular Fractal: `meson setup _build -Dprofile=development && ninja -C _build`.
+
 [![Our chat room](https://img.shields.io/matrix/fractal-gtk:matrix.org?color=blue&label=%23fractal%3Agnome.org&logo=matrix)](https://matrix.to/#/#fractal:gnome.org)
 [![Our Gitlab project](https://img.shields.io/badge/gitlab.gnome.org%2F-World%2FFractal-green?logo=gitlab)](https://gitlab.gnome.org/World/fractal/)
 [![Our documentation](https://img.shields.io/badge/%F0%9F%95%AE-Docs-B7410E?logo=rust)](https://world.pages.gitlab.gnome.org/fractal/)

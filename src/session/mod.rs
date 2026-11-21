@@ -18,6 +18,7 @@ use tokio::{task::AbortHandle, time::sleep};
 use tokio_stream::wrappers::BroadcastStream;
 use tracing::{debug, error, info};
 
+mod call;
 mod global_account_data;
 mod ignored_users;
 mod notifications;
@@ -32,8 +33,18 @@ mod user_sessions_list;
 mod verification;
 
 pub(crate) use self::{
-    global_account_data::*, ignored_users::*, notifications::*, remote::*, room::*, room_list::*,
-    security::*, session_settings::*, sidebar_data::*, user::*, user_sessions_list::*,
+    call::{Call, CallState},
+    global_account_data::*,
+    ignored_users::*,
+    notifications::*,
+    remote::*,
+    room::*,
+    room_list::*,
+    security::*,
+    session_settings::*,
+    sidebar_data::*,
+    user::*,
+    user_sessions_list::*,
     verification::*,
 };
 use crate::{
@@ -116,6 +127,9 @@ mod imp {
         /// Information about security for this session.
         #[property(get)]
         security: SessionSecurity,
+        /// The call we are in, if any.
+        #[property(get, nullable)]
+        call: RefCell<Option<Call>>,
         /// The cache for remote data.
         remote_cache: OnceCell<RemoteCache>,
         session_changes_handle: RefCell<Option<AbortHandle>>,
@@ -188,6 +202,15 @@ mod imp {
                 }
             ));
             self.network_monitor_handler_id.replace(Some(handler_id));
+        }
+
+        /// Set the call we are in.
+        pub(super) fn set_call(&self, call: Option<Call>) {
+            if *self.call.borrow() == call {
+                return;
+            }
+            self.call.replace(call);
+            self.obj().notify_call();
         }
 
         /// The Matrix client for this session.
@@ -801,6 +824,35 @@ impl Session {
     /// The Matrix client.
     pub(crate) fn client(&self) -> Client {
         self.imp().client().clone()
+    }
+
+    /// Join the call in the given room, leaving any other call first.
+    pub(crate) fn join_call(&self, room: &Room) {
+        if let Some(call) = self.call() {
+            if call.room() == *room && call.is_active() {
+                return;
+            }
+            call.leave();
+        }
+
+        let call = Call::join(room);
+        call.connect_state_notify(clone!(
+            #[weak(rename_to = obj)]
+            self,
+            move |call| {
+                if !call.is_active() && obj.call().as_ref() == Some(call) {
+                    obj.imp().set_call(None);
+                }
+            }
+        ));
+        self.imp().set_call(Some(call));
+    }
+
+    /// Leave the current call, if any.
+    pub(crate) fn leave_call(&self) {
+        if let Some(call) = self.call() {
+            call.leave();
+        }
     }
 
     /// The cache for remote data.

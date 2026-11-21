@@ -31,6 +31,7 @@ use std::sync::LazyLock;
 
 use gettextrs::*;
 use gtk::{IconTheme, gdk::Display, gio};
+use tracing::warn;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 use self::{application::*, config::*, i18n::*, utils::OneshotNotifier, window::Window};
@@ -55,6 +56,15 @@ fn main() {
     tracing_subscriber::registry()
         .with(fmt::layer().with_filter(env_filter))
         .init();
+
+    // Several crypto providers are enabled by our dependencies, so rustls cannot pick one for the
+    // connections that do not choose one themselves, like the LiveKit signalling for calls.
+    if rustls::crypto::aws_lc_rs::default_provider()
+        .install_default()
+        .is_err()
+    {
+        warn!("A TLS crypto provider was already installed");
+    }
 
     // Prepare i18n
     // Safety: `setlocale` is safe to call because the program is single-threaded.
