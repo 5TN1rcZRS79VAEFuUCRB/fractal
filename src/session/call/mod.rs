@@ -29,6 +29,13 @@ pub(crate) use self::{
 };
 use crate::{prelude::*, session::Room, spawn, spawn_tokio};
 
+/// Whether to send test patterns instead of the camera and screen.
+///
+/// For testing calls on machines without a camera or screen sharing portal.
+fn fake_media() -> bool {
+    std::env::var_os("FRACTALPLUS_FAKE_MEDIA").is_some()
+}
+
 /// The state of a call.
 #[derive(Debug, Default, Hash, Eq, PartialEq, Clone, Copy, glib::Enum)]
 #[enum_type(name = "CallState")]

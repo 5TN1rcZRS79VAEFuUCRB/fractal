@@ -170,7 +170,7 @@ fn run_capture(
             *pw::keys::MEDIA_TYPE => "Audio",
             *pw::keys::MEDIA_CATEGORY => "Capture",
             *pw::keys::NODE_NAME => node_name.as_str(),
-            *pw::keys::NODE_DESCRIPTION => "Fractal screen sharing",
+            *pw::keys::NODE_DESCRIPTION => "Fractal+ screen sharing",
         },
     )
     .map_err(|e| e.to_string())?;

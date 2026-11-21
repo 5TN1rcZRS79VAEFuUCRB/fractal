@@ -47,8 +47,8 @@ impl From<ashpd::Error> for ScreenError {
 /// A running capture of the screen.
 pub(super) struct ScreenCapture {
     pipeline: gst::Pipeline,
-    session: Session<Screencast>,
-    _fd: OwnedFd,
+    session: Option<Session<Screencast>>,
+    _fd: Option<OwnedFd>,
     /// The source receiving the frames.
     pub(super) source: NativeVideoSource,
     /// The size of the frames we send.
@@ -61,22 +61,37 @@ pub(super) struct ScreenCapture {
 impl ScreenCapture {
     /// Ask the user what to share and start capturing it.
     pub(super) async fn start() -> Result<Self, ScreenError> {
+        if super::fake_media() {
+            return Self::start_pipeline(
+                "videotestsrc is-live=true pattern=ball",
+                None,
+                Some((1920, 1080)),
+            )
+            .map(|parts| Self::from_parts(parts, None));
+        }
+
         let proxy = Screencast::new().await?;
         let session = proxy
             .create_session(CreateSessionOptions::default())
             .await?;
 
         match Self::start_with_session(&proxy, &session).await {
-            Ok((fd, node_id, size)) => match Self::start_pipeline(fd, node_id, size) {
-                Ok(parts) => {
-                    debug!("Capturing the screen from node {node_id}");
-                    Ok(Self::from_parts(parts, session))
+            Ok((fd, node_id, size)) => {
+                let source = format!(
+                    "pipewiresrc fd={} path={node_id} always-copy=true keepalive-time=1000",
+                    fd.as_raw_fd()
+                );
+                match Self::start_pipeline(&source, Some(fd), size) {
+                    Ok(parts) => {
+                        debug!("Capturing the screen from node {node_id}");
+                        Ok(Self::from_parts(parts, Some(session)))
+                    }
+                    Err(error) => {
+                        let _ = session.close().await;
+                        Err(error)
+                    }
                 }
-                Err(error) => {
-                    let _ = session.close().await;
-                    Err(error)
-                }
-            },
+            }
             Err(error) => {
                 let _ = session.close().await;
                 Err(error)
@@ -123,19 +138,18 @@ impl ScreenCapture {
         Ok((fd, node_id, size))
     }
 
-    /// Start converting the frames of the given node for `LiveKit`.
+    /// Start converting the frames of the given `GStreamer` source for
+    /// `LiveKit`.
     fn start_pipeline(
-        fd: OwnedFd,
-        node_id: u32,
+        source: &str,
+        fd: Option<OwnedFd>,
         size: Option<(i32, i32)>,
     ) -> Result<PipelineParts, ScreenError> {
         let (width, height) = scaled_size(size);
         let description = format!(
-            "pipewiresrc fd={} path={node_id} always-copy=true keepalive-time=1000 \
-             ! videoconvert ! videoscale \
+            "{source} ! videoconvert ! videoscale \
              ! video/x-raw,format=I420,width={width},height={height},pixel-aspect-ratio=1/1 \
-             ! appsink name=sink sync=false max-buffers=1 drop=true",
-            fd.as_raw_fd()
+             ! appsink name=sink sync=false max-buffers=1 drop=true"
         );
         let pipeline = gst::parse::launch(&description)
             .map_err(|error| ScreenError::Pipeline(error.to_string()))?
@@ -193,7 +207,9 @@ impl ScreenCapture {
     /// Stop capturing.
     pub(super) async fn stop(self) {
         let _ = self.pipeline.set_state(gst::State::Null);
-        if let Err(error) = self.session.close().await {
+        if let Some(session) = self.session
+            && let Err(error) = session.close().await
+        {
             debug!("Could not close screen sharing session: {error}");
         }
     }
@@ -202,7 +218,7 @@ impl ScreenCapture {
 /// A capture without its portal session yet.
 struct PipelineParts {
     pipeline: gst::Pipeline,
-    fd: OwnedFd,
+    fd: Option<OwnedFd>,
     source: NativeVideoSource,
     resolution: VideoResolution,
     ended: Option<oneshot::Receiver<()>>,
@@ -210,7 +226,7 @@ struct PipelineParts {
 
 impl ScreenCapture {
     /// Combine the pipeline parts with the portal session.
-    fn from_parts(parts: PipelineParts, session: Session<Screencast>) -> Self {
+    fn from_parts(parts: PipelineParts, session: Option<Session<Screencast>>) -> Self {
         Self {
             pipeline: parts.pipeline,
             session,

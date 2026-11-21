@@ -42,7 +42,7 @@ impl From<ashpd::Error> for CameraError {
 /// A running capture of the camera.
 pub(super) struct CameraCapture {
     pipeline: gst::Pipeline,
-    _fd: OwnedFd,
+    _fd: Option<OwnedFd>,
     /// The source receiving the frames.
     pub(super) source: NativeVideoSource,
     /// The frames, for showing ourselves.
@@ -55,6 +55,10 @@ pub(super) struct CameraCapture {
 impl CameraCapture {
     /// Ask for access to the camera and start capturing it.
     pub(super) async fn start() -> Result<Self, CameraError> {
+        if super::fake_media() {
+            return Self::start_pipeline("videotestsrc is-live=true pattern=smpte", None);
+        }
+
         let proxy = Camera::new().await?;
         if !proxy.is_present().await? {
             return Err(CameraError::NoCamera);
@@ -71,14 +75,22 @@ impl CameraCapture {
         // which only has cameras. Cameras often only send big sizes as JPEG,
         // so allow that. The caps filter keeps the scaling below from asking
         // the camera for a size it can't do raw.
+        let source = format!(
+            "pipewiresrc fd={} always-copy=true \
+             ! capsfilter caps=\"image/jpeg;video/x-raw\" ! decodebin",
+            fd.as_raw_fd()
+        );
+        Self::start_pipeline(&source, Some(fd))
+    }
+
+    /// Start converting the frames of the given `GStreamer` source for
+    /// `LiveKit`.
+    fn start_pipeline(source: &str, fd: Option<OwnedFd>) -> Result<Self, CameraError> {
         let (width, height) = SIZE;
         let description = format!(
-            "pipewiresrc fd={} always-copy=true \
-             ! capsfilter caps=\"image/jpeg;video/x-raw\" ! decodebin \
-             ! videoconvert ! videoscale ! videorate \
+            "{source} ! videoconvert ! videoscale ! videorate \
              ! video/x-raw,format=I420,width={width},height={height},pixel-aspect-ratio=1/1,framerate=30/1 \
-             ! appsink name=sink sync=false max-buffers=1 drop=true",
-            fd.as_raw_fd()
+             ! appsink name=sink sync=false max-buffers=1 drop=true"
         );
         let pipeline = gst::parse::launch(&description)
             .map_err(|error| CameraError::Pipeline(error.to_string()))?
