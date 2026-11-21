@@ -93,21 +93,19 @@ fn list_apps(excluded_pids: &[u32]) -> Result<Vec<String>, String> {
         .add_listener_local()
         .global({
             let graph = graph.clone();
-            move |global| graph.borrow_mut().add_global(global)
+            let registry = registry.clone();
+            move |global| add_global(&graph, &registry, None, global)
         })
         .register();
+    // The first roundtrip gets the objects, the second what the clients report.
+    roundtrip(&mainloop, &core);
     roundtrip(&mainloop, &core);
 
     let graph = graph.borrow();
     let names = graph
         .nodes
         .values()
-        .filter(|node| {
-            node.is_playback
-                && graph
-                    .client_pid(node)
-                    .is_some_and(|pid| !excluded_pids.contains(&pid))
-        })
+        .filter(|node| node.is_playback && graph.is_ours(node) == Some(false))
         .filter_map(|node| node.app_name.clone())
         .collect::<HashSet<_>>();
     let mut names = names.into_iter().collect::<Vec<_>>();
@@ -253,11 +251,11 @@ fn run_capture(
         .add_listener_local()
         .global({
             let graph = graph.clone();
+            let registry = registry.clone();
             let core = core.clone();
             move |global| {
-                let mut graph = graph.borrow_mut();
-                graph.add_global(global);
-                graph.link_all(&core);
+                add_global(&graph, &registry, Some(&core), global);
+                graph.borrow_mut().link_all(&core);
             }
         })
         .global_remove({
@@ -272,6 +270,59 @@ fn run_capture(
     // Remove our links before disconnecting.
     graph.borrow_mut().links.clear();
     Ok(())
+}
+
+/// Remember a new object, and watch the properties of clients.
+///
+/// With a core, links are updated when a client's properties arrive.
+fn add_global(
+    graph: &Rc<RefCell<Graph>>,
+    registry: &pw::registry::RegistryRc,
+    core: Option<&pw::core::CoreRc>,
+    global: &pw::registry::GlobalObject<&spa::utils::dict::DictRef>,
+) {
+    graph.borrow_mut().add_global(global);
+    if global.type_ != ObjectType::Client {
+        return;
+    }
+    let Ok(client) = registry.bind::<pw::client::Client, _>(global) else {
+        return;
+    };
+    let id = global.id;
+    let listener = client
+        .add_listener_local()
+        .info({
+            let graph = Rc::downgrade(graph);
+            let core = core.cloned();
+            move |info| {
+                if let Some(graph) = graph.upgrade() {
+                    let mut graph = graph.borrow_mut();
+                    graph.set_client_info(id, info.props());
+                    if let Some(core) = &core {
+                        graph.link_all(core);
+                    }
+                }
+            }
+        })
+        .register();
+    graph
+        .borrow_mut()
+        .client_proxies
+        .insert(id, (client, listener));
+}
+
+/// A client of `PipeWire`.
+#[derive(Debug, Default)]
+struct Client {
+    /// The process ID seen by `PipeWire`.
+    sec_pid: Option<u32>,
+    /// The process ID the client reports, which differs from `sec_pid` in a
+    /// sandbox like Flatpak.
+    process_id: Option<u32>,
+    /// The program the client reports.
+    binary: Option<String>,
+    /// Whether we got the properties the client reports.
+    has_info: bool,
 }
 
 /// A node in the `PipeWire` graph.
@@ -298,8 +349,9 @@ struct Graph {
     audio: Audio,
     excluded_pids: Vec<u32>,
     own_node_name: String,
-    /// The process ID of each client.
-    clients: HashMap<u32, u32>,
+    clients: HashMap<u32, Client>,
+    /// The proxies we bound to read the clients' properties.
+    client_proxies: HashMap<u32, (pw::client::Client, pw::client::ClientListener)>,
     nodes: HashMap<u32, Node>,
     ports: HashMap<u32, Port>,
     /// Our links, by output and input port.
@@ -314,9 +366,13 @@ impl Graph {
         };
         match global.type_ {
             ObjectType::Client => {
-                if let Some(pid) = props.get("pipewire.sec.pid").and_then(|p| p.parse().ok()) {
-                    self.clients.insert(global.id, pid);
-                }
+                self.clients.insert(
+                    global.id,
+                    Client {
+                        sec_pid: props.get("pipewire.sec.pid").and_then(|p| p.parse().ok()),
+                        ..Default::default()
+                    },
+                );
             }
             ObjectType::Node => {
                 self.nodes.insert(
@@ -352,9 +408,26 @@ impl Graph {
         }
     }
 
+    /// Remember the properties a client reports.
+    fn set_client_info(&mut self, id: u32, props: Option<&spa::utils::dict::DictRef>) {
+        let Some(client) = self.clients.get_mut(&id) else {
+            return;
+        };
+        if let Some(props) = props {
+            client.process_id = props
+                .get("application.process.id")
+                .and_then(|p| p.parse().ok());
+            client.binary = props
+                .get("application.process.binary")
+                .map(ToOwned::to_owned);
+        }
+        client.has_info = true;
+    }
+
     /// Forget a removed object.
     fn remove_global(&mut self, id: u32) {
         self.clients.remove(&id);
+        self.client_proxies.remove(&id);
         self.nodes.remove(&id);
         if self.ports.remove(&id).is_some() {
             self.links
@@ -362,10 +435,31 @@ impl Graph {
         }
     }
 
-    /// The process ID of the client owning the given node.
-    fn client_pid(&self, node: &Node) -> Option<u32> {
-        node.client_id
-            .and_then(|client_id| self.clients.get(&client_id).copied())
+    /// Whether the given node belongs to Fractal, or to a client we don't
+    /// know enough about yet.
+    ///
+    /// Returns `None` if we can't tell yet.
+    fn is_ours(&self, node: &Node) -> Option<bool> {
+        let client = self.clients.get(&node.client_id?)?;
+        if client
+            .sec_pid
+            .is_some_and(|pid| self.excluded_pids.contains(&pid))
+        {
+            return Some(true);
+        }
+        if !client.has_info {
+            return None;
+        }
+        // In a sandbox, `PipeWire` sees other process IDs than we do, so also
+        // check what the client reports.
+        let reported_ours = client
+            .process_id
+            .is_some_and(|pid| self.excluded_pids.contains(&pid))
+            && client
+                .binary
+                .as_deref()
+                .is_some_and(|binary| binary.starts_with("fractal"));
+        Some(reported_ours)
     }
 
     /// Whether we should capture the given node.
@@ -373,10 +467,9 @@ impl Graph {
         if !node.is_playback {
             return false;
         }
-        // Without its process we can't tell if it is us, so skip it.
-        match self.client_pid(node) {
-            Some(pid) if !self.excluded_pids.contains(&pid) => {}
-            _ => return false,
+        // If we can't tell yet whether it is us, wait.
+        if self.is_ours(node) != Some(false) {
+            return false;
         }
         match &self.audio {
             Audio::System => true,

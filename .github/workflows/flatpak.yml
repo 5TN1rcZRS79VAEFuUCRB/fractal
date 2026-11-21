@@ -1,0 +1,40 @@
+name: Flatpak
+
+on:
+  push:
+    branches: [main]
+    tags: ["*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  flatpak:
+    name: Build Flatpak
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-50
+      options: --privileged
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: flathub-infra/flatpak-github-actions/flatpak-builder@master
+        with:
+          bundle: fractalplus.flatpak
+          manifest-path: build-aux/io.github._5TN1rcZRS79VAEFuUCRB.FractalPlus.json
+          cache-key: flatpak-builder-${{ github.sha }}
+
+      - name: Name the bundle after the release
+        if: startsWith(github.ref, 'refs/tags/')
+        run: mv fractalplus.flatpak "fractalplus-${{ github.ref_name }}-x86_64.flatpak"
+
+      - name: Attach to the release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Fractal+ ${{ github.ref_name }}
+          files: fractalplus-*.flatpak
+          body: |
+            Download the `.flatpak` file below and open it to install Fractal+.
+            You need Flatpak and the Flathub remote set up: https://flathub.org/setup
