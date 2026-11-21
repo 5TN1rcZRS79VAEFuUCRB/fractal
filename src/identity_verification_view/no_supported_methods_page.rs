@@ -136,7 +136,9 @@ impl NoSupportedMethodsPage {
 
         let message = if verification.is_self_verification() {
             if was_accepted {
-                gettext("None of the methods offered by the other client are supported by Fractal+.")
+                gettext(
+                    "None of the methods offered by the other client are supported by Fractal+.",
+                )
             } else {
                 gettext(
                     "A login request was received, but none of the methods offered by the other client are supported by Fractal+.",

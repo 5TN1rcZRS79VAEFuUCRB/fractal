@@ -4,6 +4,12 @@
 )]
 #![recursion_limit = "256"]
 
+// Windows and macOS have no glycin: use the stand-in with the same API.
+#[cfg(not(target_os = "linux"))]
+extern crate glycin_gtk4_shim as glycin_gtk4;
+#[cfg(not(target_os = "linux"))]
+extern crate glycin_shim as glycin;
+
 mod account_chooser_dialog;
 mod account_switcher;
 mod application;
@@ -69,7 +75,8 @@ fn main() {
     // Prepare i18n
     // Safety: `setlocale` is safe to call because the program is single-threaded.
     unsafe { setlocale(LocaleCategory::LcAll, "") };
-    bindtextdomain(GETTEXT_PACKAGE, LOCALEDIR).expect("Invalid argument passed to bindtextdomain");
+    bindtextdomain(GETTEXT_PACKAGE, data_path(LOCALEDIR))
+        .expect("Invalid argument passed to bindtextdomain");
     textdomain(GETTEXT_PACKAGE).expect("Invalid string passed to textdomain");
 
     gtk::glib::set_application_name("Fractal+");
@@ -80,9 +87,11 @@ fn main() {
     #[cfg(target_os = "linux")]
     aperture::init(APP_ID);
 
-    let res = gio::Resource::load(RESOURCES_FILE).expect("Could not load gresource file");
+    let res =
+        gio::Resource::load(data_path(RESOURCES_FILE)).expect("Could not load gresource file");
     gio::resources_register(&res);
-    let ui_res = gio::Resource::load(UI_RESOURCES_FILE).expect("Could not load UI gresource file");
+    let ui_res = gio::Resource::load(data_path(UI_RESOURCES_FILE))
+        .expect("Could not load UI gresource file");
     gio::resources_register(&ui_res);
 
     IconTheme::for_display(&Display::default().unwrap())
@@ -90,4 +99,19 @@ fn main() {
 
     let app = Application::new();
     app.run();
+}
+
+/// Resolve a data path from the build configuration.
+///
+/// The Windows and macOS packages use paths relative to the folder above the
+/// one with the executable, so they work wherever they are installed.
+fn data_path(path: &str) -> std::path::PathBuf {
+    let path = std::path::Path::new(path);
+    if path.is_absolute() {
+        return path.to_owned();
+    }
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| Some(exe.parent()?.parent()?.join(path)))
+        .unwrap_or_else(|| path.to_owned())
 }

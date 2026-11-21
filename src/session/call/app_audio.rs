@@ -1,11 +1,15 @@
 //! Capture the sound of other apps, to share it along with the screen.
 //!
-//! The capture itself runs in the `fractalplus-screen-audio` helper, because the
+//! On Windows, `GStreamer` captures the sound of the whole system except our
+//! own process. macOS can't share sound yet.
+//!
+//! On Linux, the capture itself runs in the `fractalplus-screen-audio` helper, because the
 //! WebRTC library linked into Fractal shadows the `PipeWire` functions. The
 //! helper links the chosen apps to its own capture stream, so the apps keep
 //! playing on their usual device, and our own sound (the other people in the
 //! call) is never captured, so they don't hear themselves.
 
+#[cfg(target_os = "linux")]
 use std::{
     io::Read,
     path::PathBuf,
@@ -13,6 +17,7 @@ use std::{
     thread,
 };
 
+#[cfg(target_os = "linux")]
 use tracing::debug;
 
 /// The sample rate of the captured sound.
@@ -21,6 +26,7 @@ pub(super) const SAMPLE_RATE: u32 = 48_000;
 pub(super) const CHANNELS: u32 = 2;
 
 /// The name of the helper program.
+#[cfg(target_os = "linux")]
 const HELPER: &str = "fractalplus-screen-audio";
 
 /// Which sound to share with the screen.
@@ -45,6 +51,7 @@ pub(crate) struct AudioApp {
 /// The path of the helper program.
 ///
 /// It is installed next to Fractal. In tests, Fractal is one directory deeper.
+#[cfg(target_os = "linux")]
 fn helper_path() -> PathBuf {
     let exe = std::env::current_exe().ok();
     exe.iter()
@@ -57,6 +64,7 @@ fn helper_path() -> PathBuf {
 /// List the apps that are playing sound right now, except this one.
 ///
 /// This blocks while it runs the helper.
+#[cfg(target_os = "linux")]
 pub(crate) fn playing_apps() -> Result<Vec<AudioApp>, String> {
     let output = Command::new(helper_path())
         .arg("list")
@@ -79,11 +87,13 @@ pub(crate) fn playing_apps() -> Result<Vec<AudioApp>, String> {
 /// A running capture of the sound of other apps.
 ///
 /// The capture stops when this is dropped.
+#[cfg(target_os = "linux")]
 pub(super) struct AppAudioCapture {
     child: Child,
     reader: Option<thread::JoinHandle<()>>,
 }
 
+#[cfg(target_os = "linux")]
 impl AppAudioCapture {
     /// Start capturing the given sound.
     ///
@@ -143,6 +153,7 @@ impl AppAudioCapture {
     }
 }
 
+#[cfg(target_os = "linux")]
 impl Drop for AppAudioCapture {
     fn drop(&mut self) {
         // Closing stdin asks the helper to stop.
@@ -154,7 +165,106 @@ impl Drop for AppAudioCapture {
     }
 }
 
-#[cfg(test)]
+/// List the apps that are playing sound right now, except this one.
+///
+/// Only the sound of the whole system can be shared here, so this is empty.
+#[cfg(not(target_os = "linux"))]
+#[allow(clippy::unnecessary_wraps)]
+pub(crate) fn playing_apps() -> Result<Vec<AudioApp>, String> {
+    Ok(Vec::new())
+}
+
+/// A running capture of the sound of other apps.
+///
+/// The capture stops when this is dropped.
+#[cfg(not(target_os = "linux"))]
+pub(super) struct AppAudioCapture {
+    pipeline: gst::Pipeline,
+}
+
+#[cfg(not(target_os = "linux"))]
+impl AppAudioCapture {
+    /// Start capturing the given sound.
+    ///
+    /// `on_samples` is called from another thread with interleaved stereo
+    /// samples at [`SAMPLE_RATE`].
+    pub(super) fn start(
+        audio: ShareAudio,
+        on_samples: impl FnMut(&[f32]) + Send + 'static,
+    ) -> Result<Self, String> {
+        use std::sync::Mutex;
+
+        use gst::prelude::*;
+
+        let source = match audio {
+            ShareAudio::None => return Err("no sound to capture".to_owned()),
+            #[cfg(windows)]
+            ShareAudio::System => format!(
+                "wasapi2src loopback=true loopback-mode=exclude-process-tree loopback-target-pid={}",
+                std::process::id()
+            ),
+            #[cfg(not(windows))]
+            ShareAudio::System => {
+                return Err("sharing sound is not supported on this system yet".to_owned());
+            }
+            ShareAudio::App(_) => {
+                return Err(
+                    "sharing the sound of one app is not supported on this system yet".to_owned(),
+                );
+            }
+        };
+        let description = format!(
+            "{source} ! audioconvert ! audioresample \
+             ! audio/x-raw,format=F32LE,layout=interleaved,rate={SAMPLE_RATE},channels={CHANNELS} \
+             ! appsink name=sink sync=false"
+        );
+        let pipeline = gst::parse::launch(&description)
+            .map_err(|error| error.to_string())?
+            .downcast::<gst::Pipeline>()
+            .map_err(|_| "not a pipeline".to_owned())?;
+        let sink = pipeline
+            .by_name("sink")
+            .and_then(|sink| sink.downcast::<gst_app::AppSink>().ok())
+            .ok_or("no sink")?;
+        let on_samples = Mutex::new(on_samples);
+        sink.set_callbacks(
+            gst_app::AppSinkCallbacks::builder()
+                .new_sample(move |sink| {
+                    let sample = sink.pull_sample().map_err(|_| gst::FlowError::Eos)?;
+                    if let Some(buffer) = sample.buffer()
+                        && let Ok(map) = buffer.map_readable()
+                    {
+                        let samples = map
+                            .as_chunks::<4>()
+                            .0
+                            .iter()
+                            .map(|bytes| f32::from_le_bytes(*bytes))
+                            .collect::<Vec<_>>();
+                        if let Ok(mut on_samples) = on_samples.lock() {
+                            on_samples(&samples);
+                        }
+                    }
+                    Ok(gst::FlowSuccess::Ok)
+                })
+                .build(),
+        );
+        pipeline
+            .set_state(gst::State::Playing)
+            .map_err(|error| error.to_string())?;
+        Ok(Self { pipeline })
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+impl Drop for AppAudioCapture {
+    fn drop(&mut self) {
+        use gst::prelude::*;
+
+        let _ = self.pipeline.set_state(gst::State::Null);
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use std::{
         process::Command,

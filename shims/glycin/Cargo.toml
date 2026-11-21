@@ -1,0 +1,14 @@
+[package]
+name = "glycin-shim"
+version = "0.2.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+publish = false
+description = "The parts of the glycin API Fractal+ uses, for systems without glycin"
+
+
+[dependencies]
+gdk = { version = "0.11", package = "gdk4", features = ["v4_6"] }
+gio = "0.22"
+glib = "0.22"
+webp = { version = "0.3", default-features = false }

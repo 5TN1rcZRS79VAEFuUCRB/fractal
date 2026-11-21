@@ -19,3 +19,4 @@ target/
 # Dynamically-generated files
 src/config.rs
 hooks/checks-bin
+_build-data/

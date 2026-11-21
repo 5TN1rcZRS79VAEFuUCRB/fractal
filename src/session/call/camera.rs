@@ -1,7 +1,11 @@
-//! Capture the camera through the Camera portal, for video calls.
+//! Capture the camera for video calls: through the Camera portal on Linux, and
+//! with `GStreamer`'s own camera sources elsewhere.
 
-use std::os::fd::{AsRawFd, OwnedFd};
+use std::any::Any;
+#[cfg(target_os = "linux")]
+use std::os::fd::AsRawFd;
 
+#[cfg(target_os = "linux")]
 use ashpd::desktop::{
     ResponseError,
     camera::{Camera, CameraAccessOptions, OpenPipeWireRemoteOptions},
@@ -25,24 +29,33 @@ pub(super) enum CameraError {
     #[error("access to the camera was denied")]
     Denied,
     #[error("could not use the camera portal: {0}")]
-    Portal(ashpd::Error),
+    Portal(String),
     #[error("could not capture the camera: {0}")]
     Pipeline(String),
 }
 
+#[cfg(target_os = "linux")]
 impl From<ashpd::Error> for CameraError {
     fn from(error: ashpd::Error) -> Self {
         match error {
             ashpd::Error::Response(ResponseError::Cancelled | ResponseError::Other) => Self::Denied,
-            error => Self::Portal(error),
+            error => Self::Portal(error.to_string()),
         }
     }
 }
 
+/// Lets cameras send big sizes as JPEG, which they often only do. The caps
+/// filter keeps the scaling after it from asking the camera for a size it
+/// can't do raw.
+const DECODE: &str = "capsfilter caps=\"image/jpeg;video/x-raw\" ! decodebin";
+
 /// A running capture of the camera.
 pub(super) struct CameraCapture {
     pipeline: gst::Pipeline,
-    _fd: Option<OwnedFd>,
+    /// What must stay alive while capturing, like the portal's file
+    /// descriptor.
+    #[allow(dead_code, reason = "only kept alive")]
+    keep: Option<Box<dyn Any + Send + Sync>>,
     /// The source receiving the frames.
     pub(super) source: NativeVideoSource,
     /// The frames, for showing ourselves.
@@ -58,7 +71,18 @@ impl CameraCapture {
         if super::fake_media() {
             return Self::start_pipeline("videotestsrc is-live=true pattern=smpte", None);
         }
+        #[cfg(target_os = "linux")]
+        return Self::start_portal().await;
+        #[cfg(windows)]
+        return Self::start_pipeline(&format!("mfvideosrc ! {DECODE}"), None);
+        #[cfg(target_os = "macos")]
+        return Self::start_pipeline(&format!("avfvideosrc ! {DECODE}"), None);
+    }
 
+    /// Ask the Camera portal for access and start capturing the default
+    /// camera.
+    #[cfg(target_os = "linux")]
+    async fn start_portal() -> Result<Self, CameraError> {
         let proxy = Camera::new().await?;
         if !proxy.is_present().await? {
             return Err(CameraError::NoCamera);
@@ -72,20 +96,20 @@ impl CameraCapture {
             .await?;
 
         // Without a path, pipewiresrc picks the default camera of the remote,
-        // which only has cameras. Cameras often only send big sizes as JPEG,
-        // so allow that. The caps filter keeps the scaling below from asking
-        // the camera for a size it can't do raw.
+        // which only has cameras.
         let source = format!(
-            "pipewiresrc fd={} always-copy=true \
-             ! capsfilter caps=\"image/jpeg;video/x-raw\" ! decodebin",
+            "pipewiresrc fd={} always-copy=true ! {DECODE}",
             fd.as_raw_fd()
         );
-        Self::start_pipeline(&source, Some(fd))
+        Self::start_pipeline(&source, Some(Box::new(fd)))
     }
 
     /// Start converting the frames of the given `GStreamer` source for
     /// `LiveKit`.
-    fn start_pipeline(source: &str, fd: Option<OwnedFd>) -> Result<Self, CameraError> {
+    fn start_pipeline(
+        source: &str,
+        keep: Option<Box<dyn Any + Send + Sync>>,
+    ) -> Result<Self, CameraError> {
         let (width, height) = SIZE;
         let description = format!(
             "{source} ! videoconvert ! videoscale ! videorate \
@@ -140,7 +164,7 @@ impl CameraCapture {
 
         Ok(Self {
             pipeline,
-            _fd: fd,
+            keep,
             source,
             preview,
             ended: Some(ended_rx),

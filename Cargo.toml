@@ -65,15 +65,12 @@ zeroize = "1"
 
 # gtk-rs project and dependents. These usually need to be updated together.
 adw = { version = "0.9", features = ["gtk_v4_10", "v1_8"], package = "libadwaita" }
-glycin = { version = "0.2", package = "libglycin-rebind" }
-glycin-gtk4 = { version = "0.2", package = "libglycin-gtk4-rebind" }
 gst = { version = "0.25", package = "gstreamer" }
 gst_app = { version = "0.25", package = "gstreamer-app" }
 gst_pbutils = { version = "0.25", package = "gstreamer-pbutils" }
 gst_play = { version = "0.25", package = "gstreamer-play" }
 gst_video = { version = "0.25", package = "gstreamer-video" }
 gtk = { version = "0.11", features = ["gnome_49"], package = "gtk4" }
-shumate = { version = "0.8", features = ["v1_1"], package = "libshumate" }
 sourceview = { version = "0.11", package = "sourceview5" }
 
 [dependencies.matrix-sdk]
@@ -133,6 +130,8 @@ features = ["native", "rustls-tls-native-roots"]
 
 # Linux-only dependencies.
 [target.'cfg(target_os = "linux")'.dependencies]
+glycin = { version = "0.2", package = "libglycin-rebind" }
+glycin-gtk4 = { version = "0.2", package = "libglycin-gtk4-rebind" }
 aperture = "0.12"
 ashpd = { version = "0.14", default-features = false, features = [
     "camera",
@@ -162,3 +161,14 @@ new_without_default = "allow"
 struct_field_names = "allow"
 unsafe_derive_deserialize = "allow"
 wildcard_imports = "allow"
+
+# Windows has no libshumate, so locations are shown without a map there.
+[target.'cfg(not(windows))'.dependencies]
+shumate = { version = "0.8", features = ["v1_1"], package = "libshumate" }
+
+# Windows and macOS have no glycin, so use a stand-in with the same API. main.rs
+# renames it to glycin.
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+glycin-shim = { path = "shims/glycin" }
+glycin-gtk4-shim = { path = "shims/glycin-gtk4" }
+keyring = { version = "3", features = ["apple-native", "windows-native"] }

@@ -16,6 +16,8 @@ use url::Url;
 use zeroize::Zeroizing;
 
 mod file;
+#[cfg(not(target_os = "linux"))]
+mod keychain;
 #[cfg(target_os = "linux")]
 mod linux;
 
@@ -38,7 +40,7 @@ cfg_select! {
     }
     _ => {
         /// The secret API.
-        pub(crate) type Secret = unimplemented::UnimplementedSecret;
+        pub(crate) type Secret = keychain::KeychainSecret;
     }
 }
 
@@ -53,29 +55,6 @@ pub(crate) trait SecretExt {
 
     /// Delete the given session from the secret backend.
     async fn delete_session(session: StoredSession);
-}
-
-/// The fallback `Secret` API, to use on platforms where it is unimplemented.
-#[cfg(not(target_os = "linux"))]
-mod unimplemented {
-    use super::*;
-
-    #[derive(Debug)]
-    pub(crate) struct UnimplementedSecret;
-
-    impl SecretExt for UnimplementedSecret {
-        async fn restore_sessions() -> Result<Vec<StoredSession>, SecretError> {
-            unimplemented!()
-        }
-
-        async fn store_session(session: StoredSession) -> Result<(), SecretError> {
-            unimplemented!()
-        }
-
-        async fn delete_session(session: StoredSession) {
-            unimplemented!()
-        }
-    }
 }
 
 /// Any error that can happen when interacting with the secret service.

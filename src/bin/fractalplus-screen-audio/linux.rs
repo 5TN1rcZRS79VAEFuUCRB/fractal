@@ -42,7 +42,7 @@ enum Audio {
     App(String),
 }
 
-fn main() -> ExitCode {
+pub(crate) fn main() -> ExitCode {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     let (command, rest) = match args.split_first() {
         Some((command, rest)) => (command.as_str(), rest),
