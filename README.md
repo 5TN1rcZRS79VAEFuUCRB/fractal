@@ -11,12 +11,22 @@ Calls work with Element Call, so you can call people who use Element.
 - 🧪 Screen sharing with sound from your apps (new, not well tested yet)
 - 🚧 Camera video
 
+## Install
+
+Download the `.flatpak` file from the [latest release](../../releases) and open it, or run:
+
+```sh
+flatpak install fractalplus-*-x86_64.flatpak
+```
+
+You need Flatpak with the Flathub remote set up: <https://flathub.org/setup>
+
 ## Requirements
 
 Your homeserver needs a call server set up (LiveKit with lk-jwt-service, the same setup Element
 Call uses).
 
-## Build
+## Build from source
 
 ```sh
 meson setup _build
