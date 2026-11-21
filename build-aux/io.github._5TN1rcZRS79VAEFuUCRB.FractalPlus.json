@@ -4,7 +4,8 @@
     "runtime-version": "50",
     "sdk": "org.gnome.Sdk",
     "sdk-extensions": [
-        "org.freedesktop.Sdk.Extension.rust-stable"
+        "org.freedesktop.Sdk.Extension.rust-stable",
+        "org.freedesktop.Sdk.Extension.llvm21"
     ],
     "command": "fractalplus",
     "finish-args": [
@@ -17,7 +18,11 @@
         "--filesystem=xdg-run/pipewire-0"
     ],
     "build-options": {
-        "append-path": "/usr/lib/sdk/rust-stable/bin",
+        "append-path": "/usr/lib/sdk/rust-stable/bin:/usr/lib/sdk/llvm21/bin",
+        "prepend-ld-library-path": "/usr/lib/sdk/llvm21/lib",
+        "env": {
+            "LIBCLANG_PATH": "/usr/lib/sdk/llvm21/lib"
+        },
         "build-args": [
             "--share=network"
         ]
