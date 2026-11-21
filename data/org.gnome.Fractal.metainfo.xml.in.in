@@ -75,6 +75,15 @@
   </content_rating>
 
   <releases>@development-release@
+    <release version="14.3.1" type="stable" date="2026-11-21">
+      <description>
+        <p>The first release of Fractal+, based on Fractal 14.3.</p>
+        <ul>
+          <li>Join and start end-to-end encrypted group voice calls, compatible with Element Call</li>
+          <li>Share your screen or a window, with the sound of all your apps or of a single app</li>
+        </ul>
+      </description>
+    </release>
     <release version="14.3" type="stable" date="2026-10-26">
       <description>
         <p>
