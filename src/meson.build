@@ -105,7 +105,7 @@ if not build_env_only
         build_by_default: true,
         build_always_stale: true,
         # The helper capturing app sound for screen sharing is built with it.
-        output: [meson.project_name(), 'fractal-screen-audio'],
+        output: [binary_name, 'fractalplus-screen-audio'],
         console: true,
         install: true,
         install_dir: [bindir, bindir],
@@ -121,7 +121,7 @@ if not build_env_only
             '@OUTPUT0@',
             '&&',
             'cp',
-            cargo_target_dir / rust_target / 'fractal-screen-audio',
+            cargo_target_dir / rust_target / 'fractalplus-screen-audio',
             '@OUTPUT1@',
         ],
     )

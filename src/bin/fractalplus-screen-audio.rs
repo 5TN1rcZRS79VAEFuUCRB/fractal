@@ -6,10 +6,10 @@
 //!
 //! Usage:
 //!
-//! - `fractal-screen-audio list [EXCLUDED_PID]`: print the names of the apps
+//! - `fractalplus-screen-audio list [EXCLUDED_PID]`: print the names of the apps
 //!   playing sound, one per line.
-//! - `fractal-screen-audio system [EXCLUDED_PID]`: capture every app.
-//! - `fractal-screen-audio app NAME [EXCLUDED_PID]`: capture the app with the
+//! - `fractalplus-screen-audio system [EXCLUDED_PID]`: capture every app.
+//! - `fractalplus-screen-audio app NAME [EXCLUDED_PID]`: capture the app with the
 //!   given name.
 //!
 //! The sound is written as interleaved stereo 32-bit float samples at 48 kHz.
@@ -53,7 +53,7 @@ fn main() -> ExitCode {
         "system" => (Some(Audio::System), rest),
         "app" if !rest.is_empty() => (Some(Audio::App(rest[0].clone())), &rest[1..]),
         _ => {
-            eprintln!("Usage: fractal-screen-audio list|system|app NAME [EXCLUDED_PID]");
+            eprintln!("Usage: fractalplus-screen-audio list|system|app NAME [EXCLUDED_PID]");
             return ExitCode::from(2);
         }
     };
@@ -164,10 +164,10 @@ fn run_capture(
         move |()| mainloop.quit()
     });
 
-    let node_name = format!("fractal-screen-audio-{}", std::process::id());
+    let node_name = format!("fractalplus-screen-audio-{}", std::process::id());
     let stream = pw::stream::StreamRc::new(
         core.clone(),
-        "fractal-screen-audio",
+        "fractalplus-screen-audio",
         properties! {
             *pw::keys::MEDIA_TYPE => "Audio",
             *pw::keys::MEDIA_CATEGORY => "Capture",

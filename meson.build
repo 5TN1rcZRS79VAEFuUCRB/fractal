@@ -11,7 +11,10 @@ gnome = import('gnome')
 i18n = import('i18n')
 
 base_id = 'org.gnome.Fractal'
-application_id = base_id
+# This fork installs under its own names, so it can be installed next to
+# Fractal. `base_id` is only used for the names of the source files.
+application_id = 'io.github._5TN1rcZRS79VAEFuUCRB.FractalPlus'
+binary_name = 'fractalplus'
 
 major_version = '14.3'
 pre_release_version = ''
@@ -78,10 +81,10 @@ bindir = prefix / get_option('bindir')
 localedir = prefix / get_option('localedir')
 
 datadir = prefix / get_option('datadir')
-pkgdatadir = datadir / meson.project_name()
+pkgdatadir = datadir / binary_name
 iconsdir = datadir / 'icons'
 podir = meson.project_source_root() / 'po'
-gettext_package = meson.project_name()
+gettext_package = binary_name
 
 if get_option('profile') == 'development' or build_env_only
     profile = 'Devel'

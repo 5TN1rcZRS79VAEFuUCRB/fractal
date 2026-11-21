@@ -1,7 +1,7 @@
-# Fractal with calls
+# Fractal+
 
 An unofficial fork of [Fractal](https://gitlab.gnome.org/World/fractal), the GNOME Matrix app,
-that adds voice calls.
+that adds voice calls and screen sharing. It installs next to Fractal without replacing it.
 
 Calls work with Element Call, so you can call people who use Element.
 
@@ -22,6 +22,7 @@ Call uses).
 meson setup _build
 ninja -C _build
 sudo ninja -C _build install
+fractalplus
 ```
 
 ## Problems

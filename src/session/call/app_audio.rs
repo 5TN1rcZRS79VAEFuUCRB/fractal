@@ -1,6 +1,6 @@
 //! Capture the sound of other apps, to share it along with the screen.
 //!
-//! The capture itself runs in the `fractal-screen-audio` helper, because the
+//! The capture itself runs in the `fractalplus-screen-audio` helper, because the
 //! WebRTC library linked into Fractal shadows the `PipeWire` functions. The
 //! helper links the chosen apps to its own capture stream, so the apps keep
 //! playing on their usual device, and our own sound (the other people in the
@@ -21,7 +21,7 @@ pub(super) const SAMPLE_RATE: u32 = 48_000;
 pub(super) const CHANNELS: u32 = 2;
 
 /// The name of the helper program.
-const HELPER: &str = "fractal-screen-audio";
+const HELPER: &str = "fractalplus-screen-audio";
 
 /// Which sound to share with the screen.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
