@@ -13,13 +13,14 @@ Calls work with Element Call, so you can call people who use Element.
 
 ## Install
 
-Download the `.flatpak` file from the [latest release](../../releases) and open it, or run:
+On any Linux distribution with [Flatpak](https://flathub.org/setup):
 
 ```sh
-flatpak install fractalplus-*-x86_64.flatpak
+flatpak install --from https://5tn1rczrs79vaefuucrb.github.io/fractalplus/fractalplus.flatpakref
 ```
 
-You need Flatpak with the Flathub remote set up: <https://flathub.org/setup>
+Or download the `.flatpak` file from the [latest release](../../releases) and open it.
+Either way, Fractal+ then updates with `flatpak update` or in your software app.
 
 ## Requirements
 
