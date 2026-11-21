@@ -104,10 +104,11 @@ if not build_env_only
         'cargo-build',
         build_by_default: true,
         build_always_stale: true,
-        output: meson.project_name(),
+        # The helper capturing app sound for screen sharing is built with it.
+        output: [meson.project_name(), 'fractal-screen-audio'],
         console: true,
         install: true,
-        install_dir: bindir,
+        install_dir: [bindir, bindir],
         depends: [resources, ui_resources],
         env: cargo_env,
         command: [
@@ -117,7 +118,11 @@ if not build_env_only
             '&&',
             'cp',
             cargo_target_dir / rust_target / meson.project_name(),
-            '@OUTPUT@',
+            '@OUTPUT0@',
+            '&&',
+            'cp',
+            cargo_target_dir / rust_target / 'fractal-screen-audio',
+            '@OUTPUT1@',
         ],
     )
 

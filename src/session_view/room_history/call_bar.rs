@@ -1,11 +1,12 @@
 use adw::{prelude::*, subclass::prelude::*};
 use gettextrs::gettext;
-use gtk::{glib, glib::clone};
+use gtk::{gio, glib, glib::clone};
+use tracing::warn;
 
 use crate::{
     gettext_f, ngettext_f,
-    session::{Call, CallState, Room, Session},
-    toast,
+    session::{AudioApp, Call, CallState, Room, Session, ShareAudio, playing_apps},
+    spawn, toast,
 };
 
 mod imp {
@@ -22,6 +23,7 @@ mod imp {
         revealer: OnceCell<gtk::Revealer>,
         status: OnceCell<gtk::Label>,
         mute_button: OnceCell<gtk::ToggleButton>,
+        share_button: OnceCell<gtk::Button>,
         action_button: OnceCell<gtk::Button>,
         /// The session we watch, with its handler.
         session: RefCell<Option<(Session, glib::SignalHandlerId)>>,
@@ -66,6 +68,15 @@ mod imp {
                     button.set_tooltip_text(Some(&gettext("Mute")));
                 }
             });
+            let share_button = gtk::Button::builder()
+                .icon_name("screen-shared-symbolic")
+                .valign(gtk::Align::Center)
+                .build();
+            share_button.connect_clicked(clone!(
+                #[weak(rename_to = imp)]
+                self,
+                move |_| imp.toggle_screen_share()
+            ));
             let action_button = gtk::Button::builder().valign(gtk::Align::Center).build();
             action_button.connect_clicked(clone!(
                 #[weak(rename_to = imp)]
@@ -83,6 +94,7 @@ mod imp {
             content.append(&icon);
             content.append(&status);
             content.append(&mute_button);
+            content.append(&share_button);
             content.append(&action_button);
 
             let revealer = gtk::Revealer::builder()
@@ -95,6 +107,7 @@ mod imp {
             self.revealer.set(revealer).unwrap();
             self.status.set(status).unwrap();
             self.mute_button.set(mute_button).unwrap();
+            self.share_button.set(share_button).unwrap();
             self.action_button.set(action_button).unwrap();
             self.update();
         }
@@ -179,19 +192,36 @@ mod imp {
             }
 
             if let Some(call) = call {
-                let handlers = ["state", "participants-count", "speaking"]
-                    .into_iter()
-                    .map(|property| {
-                        call.connect_notify_local(
-                            Some(property),
-                            clone!(
-                                #[weak(rename_to = imp)]
-                                self,
-                                move |_, _| imp.update()
-                            ),
-                        )
-                    })
-                    .collect();
+                let mut handlers = [
+                    "state",
+                    "participants-count",
+                    "speaking",
+                    "sharing-screen",
+                    "starting-screen-share",
+                ]
+                .into_iter()
+                .map(|property| {
+                    call.connect_notify_local(
+                        Some(property),
+                        clone!(
+                            #[weak(rename_to = imp)]
+                            self,
+                            move |_, _| imp.update()
+                        ),
+                    )
+                })
+                .collect::<Vec<_>>();
+                handlers.push(call.connect_screen_share_failed(clone!(
+                    #[weak(rename_to = imp)]
+                    self,
+                    move |_, error| {
+                        let obj = imp.obj();
+                        toast!(
+                            obj,
+                            gettext_f("Screen sharing: {error}", &[("error", &error)])
+                        );
+                    }
+                )));
                 if let Some(mute_button) = self.mute_button.get() {
                     let binding = call
                         .bind_property("muted", mute_button, "active")
@@ -219,14 +249,124 @@ mod imp {
             }
         }
 
+        /// Start or stop sharing the screen.
+        fn toggle_screen_share(&self) {
+            let Some(call) = self.call.borrow().as_ref().map(|(call, _)| call.clone()) else {
+                return;
+            };
+            if call.sharing_screen() {
+                call.stop_screen_share();
+                return;
+            }
+            if call.starting_screen_share() {
+                return;
+            }
+
+            spawn!(clone!(
+                #[weak(rename_to = imp)]
+                self,
+                async move {
+                    if let Some(audio) = imp.choose_audio().await
+                        && call.is_active()
+                    {
+                        call.start_screen_share(audio);
+                    }
+                }
+            ));
+        }
+
+        /// Ask which sound to share with the screen.
+        async fn choose_audio(&self) -> Option<ShareAudio> {
+            let apps = match gio::spawn_blocking(playing_apps).await {
+                Ok(Ok(apps)) => apps,
+                Ok(Err(error)) => {
+                    warn!("Could not list apps playing sound: {error}");
+                    Vec::new()
+                }
+                Err(_) => Vec::new(),
+            };
+
+            let mut options = vec![
+                (gettext("No Sound"), None, ShareAudio::None),
+                (
+                    gettext("All Sound"),
+                    Some(gettext("From every app except this one")),
+                    ShareAudio::System,
+                ),
+            ];
+            options.extend(apps.into_iter().map(|AudioApp { name }| {
+                (
+                    name.clone(),
+                    Some(gettext("Only this app")),
+                    ShareAudio::App(name),
+                )
+            }));
+
+            let list = gtk::ListBox::builder()
+                .selection_mode(gtk::SelectionMode::None)
+                .css_classes(["boxed-list"])
+                .build();
+            let mut first: Option<gtk::CheckButton> = None;
+            let mut choices = Vec::new();
+            for (title, subtitle, audio) in options {
+                let check = gtk::CheckButton::new();
+                match &first {
+                    Some(first) => check.set_group(Some(first)),
+                    None => first = Some(check.clone()),
+                }
+                check.set_active(audio == ShareAudio::System);
+                let row = adw::ActionRow::builder()
+                    .title(title)
+                    .activatable_widget(&check)
+                    .build();
+                if let Some(subtitle) = subtitle {
+                    row.set_subtitle(&subtitle);
+                }
+                row.add_prefix(&check);
+                list.append(&row);
+                choices.push((check, audio));
+            }
+
+            let dialog = adw::AlertDialog::builder()
+                .heading(gettext("Share Screen"))
+                .body(gettext(
+                    "Choose which sound to share. The sound of this call is never shared.",
+                ))
+                .extra_child(&list)
+                .default_response("share")
+                .close_response("cancel")
+                .build();
+            dialog.add_responses(&[
+                ("cancel", &gettext("Cancel")),
+                ("share", &gettext("Choose Screen…")),
+            ]);
+            dialog.set_response_appearance("share", adw::ResponseAppearance::Suggested);
+
+            if dialog.choose_future(Some(&*self.obj())).await != "share" {
+                return None;
+            }
+            choices
+                .into_iter()
+                .find(|(check, _)| check.is_active())
+                .map(|(_, audio)| audio)
+        }
+
         /// Update the widgets for the current state.
         fn update(&self) {
-            let (Some(revealer), Some(status), Some(mute_button), Some(action_button)) = (
+            let (
+                Some(revealer),
+                Some(status),
+                Some(mute_button),
+                Some(share_button),
+                Some(action_button),
+            ) = (
                 self.revealer.get(),
                 self.status.get(),
                 self.mute_button.get(),
+                self.share_button.get(),
                 self.action_button.get(),
-            ) else {
+            )
+            else {
                 return;
             };
 
@@ -243,18 +383,32 @@ mod imp {
                             &[("n", &count.to_string())],
                         );
                         let speaking = call.speaking();
-                        if speaking.is_empty() {
+                        let people = if speaking.is_empty() {
                             people
                         } else {
                             gettext_f(
                                 "{people} · {speaking} speaking",
                                 &[("people", &people), ("speaking", &speaking)],
                             )
+                        };
+                        if call.sharing_screen() {
+                            gettext_f("{people} · Sharing screen", &[("people", &people)])
+                        } else {
+                            people
                         }
                     }
                 };
                 status.set_label(&text);
                 mute_button.set_visible(true);
+                share_button.set_visible(call.state() == CallState::Connected);
+                share_button.set_sensitive(!call.starting_screen_share());
+                if call.sharing_screen() {
+                    share_button.set_tooltip_text(Some(&gettext("Stop Sharing Screen")));
+                    share_button.add_css_class("accent");
+                } else {
+                    share_button.set_tooltip_text(Some(&gettext("Share Screen")));
+                    share_button.remove_css_class("accent");
+                }
                 action_button.set_icon_name("call-stop-symbolic");
                 action_button.set_tooltip_text(Some(&gettext("Leave Call")));
                 action_button.remove_css_class("suggested-action");
@@ -281,6 +435,7 @@ mod imp {
                 &[("n", &count.to_string())],
             ));
             mute_button.set_visible(false);
+            share_button.set_visible(false);
             action_button.set_icon_name("call-start-symbolic");
             action_button.set_tooltip_text(Some(&gettext("Join Call")));
             action_button.remove_css_class("destructive-action");

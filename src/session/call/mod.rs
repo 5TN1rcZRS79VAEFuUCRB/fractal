@@ -1,15 +1,26 @@
 //! Voice calls compatible with Element Call (`MatrixRTC` over `LiveKit`).
 
-use std::cell::{Cell, OnceCell, RefCell};
+use std::{
+    cell::{Cell, OnceCell, RefCell},
+    sync::LazyLock,
+};
 
 use gettextrs::gettext;
-use gtk::{glib, glib::clone, prelude::*, subclass::prelude::*};
+use gtk::{
+    glib,
+    glib::{clone, subclass::Signal},
+    prelude::*,
+    subclass::prelude::*,
+};
 use tokio::sync::mpsc;
 use tracing::{debug, error};
 
+mod app_audio;
 mod engine;
 mod rtc;
+mod screen;
 
+pub(crate) use self::app_audio::{AudioApp, ShareAudio, playing_apps};
 use self::engine::{Command, Update};
 use crate::{prelude::*, session::Room, spawn, spawn_tokio};
 
@@ -47,6 +58,12 @@ mod imp {
         /// The display names of the people speaking right now.
         #[property(get)]
         speaking: RefCell<String>,
+        /// Whether we are sharing our screen.
+        #[property(get)]
+        sharing_screen: Cell<bool>,
+        /// Whether we are waiting for the user to choose what to share.
+        #[property(get)]
+        starting_screen_share: Cell<bool>,
         /// Why the call ended, if it failed.
         #[property(get, nullable)]
         error: RefCell<Option<String>>,
@@ -61,7 +78,19 @@ mod imp {
     }
 
     #[glib::derived_properties]
-    impl ObjectImpl for Call {}
+    impl ObjectImpl for Call {
+        fn signals() -> &'static [Signal] {
+            static SIGNALS: LazyLock<Vec<Signal>> = LazyLock::new(|| {
+                vec![
+                    // Sharing the screen, or its sound, failed.
+                    Signal::builder("screen-share-failed")
+                        .param_types([String::static_type()])
+                        .build(),
+                ]
+            });
+            SIGNALS.as_ref()
+        }
+    }
 
     impl Call {
         /// Set whether our microphone is muted.
@@ -111,6 +140,16 @@ mod imp {
                         obj.notify_speaking();
                     }
                 }
+                Update::ScreenShare(active) => {
+                    self.set_starting_screen_share(false);
+                    if self.sharing_screen.replace(active) != active {
+                        obj.notify_sharing_screen();
+                    }
+                }
+                Update::ScreenShareFailed(error) => {
+                    self.set_starting_screen_share(false);
+                    obj.emit_by_name::<()>("screen-share-failed", &[&error]);
+                }
                 Update::Ended(error) => {
                     self.commands.take();
                     if error.is_some() {
@@ -119,6 +158,13 @@ mod imp {
                     }
                     self.set_state(CallState::Ended);
                 }
+            }
+        }
+
+        /// Set whether we are waiting for the user to choose what to share.
+        pub(super) fn set_starting_screen_share(&self, starting: bool) {
+            if self.starting_screen_share.replace(starting) != starting {
+                self.obj().notify_starting_screen_share();
             }
         }
 
@@ -187,6 +233,34 @@ impl Call {
             // The call task is gone, so nobody will tell us the call ended.
             self.imp().handle_update(Update::Ended(None));
         }
+    }
+
+    /// Ask the user what to share and share their screen, with the given
+    /// sound.
+    pub(crate) fn start_screen_share(&self, audio: ShareAudio) {
+        if self.sharing_screen() || self.starting_screen_share() {
+            return;
+        }
+        if self.imp().send(Command::StartScreenShare(audio)) {
+            self.imp().set_starting_screen_share(true);
+        }
+    }
+
+    /// Stop sharing the screen.
+    pub(crate) fn stop_screen_share(&self) {
+        self.imp().send(Command::StopScreenShare);
+    }
+
+    /// Connect to the signal emitted when sharing the screen fails.
+    pub(crate) fn connect_screen_share_failed<F: Fn(&Self, String) + 'static>(
+        &self,
+        f: F,
+    ) -> glib::SignalHandlerId {
+        self.connect_closure(
+            "screen-share-failed",
+            true,
+            glib::closure_local!(move |obj: Self, error: String| f(&obj, error)),
+        )
     }
 
     /// Whether this call is still running.

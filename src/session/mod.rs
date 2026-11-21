@@ -33,7 +33,7 @@ mod user_sessions_list;
 mod verification;
 
 pub(crate) use self::{
-    call::{Call, CallState},
+    call::{AudioApp, Call, CallState, ShareAudio, playing_apps},
     global_account_data::*,
     ignored_users::*,
     notifications::*,

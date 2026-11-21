@@ -1,6 +1,7 @@
 //! The task running a call: `MatrixRTC` membership, media keys and `LiveKit`.
 
 use std::{
+    borrow::Cow,
     collections::{HashMap, HashSet},
     time::Duration,
 };
@@ -10,8 +11,13 @@ use livekit::{
         E2eeOptions, EncryptionType,
         key_provider::{KeyDerivationAlgorithm, KeyProvider, KeyProviderOptions},
     },
-    options::TrackPublishOptions,
+    options::{AudioEncoding, TrackPublishOptions, VideoCodec, VideoEncoding},
     prelude::*,
+    webrtc::{
+        audio_frame::AudioFrame,
+        audio_source::{AudioSourceOptions, RtcAudioSource, native::NativeAudioSource},
+        video_source::RtcVideoSource,
+    },
 };
 use matrix_sdk::{
     Client, Room as MatrixRoom, deserialized_responses::EncryptionInfo,
@@ -23,11 +29,16 @@ use ruma::{
 };
 use serde::Deserialize;
 use serde_json::Value as JsonValue;
-use tokio::sync::mpsc;
+use tokio::{
+    sync::{mpsc, oneshot},
+    task::{JoinError, JoinHandle},
+};
 use tracing::{debug, info, warn};
 
-use super::rtc::{
-    self, CALL_KEYS_EVENT_TYPE, DELAYED_LEAVE_RESTART, MediaKey, Membership, RtcError,
+use super::{
+    app_audio::{self, AppAudioCapture, ShareAudio},
+    rtc::{self, CALL_KEYS_EVENT_TYPE, DELAYED_LEAVE_RESTART, MediaKey, Membership, RtcError},
+    screen::{ScreenCapture, ScreenError},
 };
 
 /// How long to wait before using a new media key, so other participants
@@ -39,6 +50,11 @@ const USE_KEY_DELAY: Duration = Duration::from_secs(1);
 pub(super) enum Command {
     /// Mute or unmute the microphone.
     SetMuted(bool),
+    /// Ask the user what to share and share their screen, with the given
+    /// sound.
+    StartScreenShare(ShareAudio),
+    /// Stop sharing the screen.
+    StopScreenShare,
     /// Leave the call.
     Leave,
 }
@@ -50,6 +66,10 @@ pub(super) enum Update {
     Connected,
     /// The participants changed.
     Participants(Vec<Participant>),
+    /// Whether we are sharing our screen changed.
+    ScreenShare(bool),
+    /// Sharing the screen, or its sound, failed.
+    ScreenShareFailed(String),
     /// The call ended, with an error message if it failed.
     Ended(Option<String>),
 }
@@ -153,6 +173,23 @@ struct CallTask {
     livekit_events: mpsc::UnboundedReceiver<RoomEvent>,
     microphone: LocalAudioTrack,
     _audio: PlatformAudio,
+    /// The screen capture the user is choosing, with the sound to share.
+    share_request: Option<(JoinHandle<Result<ScreenCapture, ScreenError>>, ShareAudio)>,
+    /// The screen we are sharing.
+    screen: Option<ScreenShare>,
+    /// Resolves when the screen capture stops by itself.
+    screen_ended: Option<oneshot::Receiver<()>>,
+}
+
+/// A screen we are sharing.
+struct ScreenShare {
+    capture: ScreenCapture,
+    /// The tracks we published for it.
+    tracks: Vec<TrackSid>,
+    /// The capture of the sound of other apps.
+    audio: Option<AppAudioCapture>,
+    /// The task sending the sound to `LiveKit`.
+    audio_pump: Option<JoinHandle<()>>,
 }
 
 impl CallTask {
@@ -287,6 +324,9 @@ impl CallTask {
             livekit_events,
             microphone,
             _audio: audio,
+            share_request: None,
+            screen: None,
+            screen_ended: None,
         })
     }
 
@@ -312,6 +352,14 @@ impl CallTask {
                 command = commands.recv() => match command {
                     Some(Command::SetMuted(true)) => self.microphone.mute(),
                     Some(Command::SetMuted(false)) => self.microphone.unmute(),
+                    Some(Command::StartScreenShare(audio)) => self.request_screen_share(audio),
+                    Some(Command::StopScreenShare) => {
+                        if let Some((request, _)) = self.share_request.take() {
+                            request.abort();
+                        }
+                        self.stop_screen_share().await;
+                        let _ = updates.send(Update::ScreenShare(false));
+                    }
                     Some(Command::Leave) | None => return Ok(()),
                 },
                 event = self.livekit_events.recv() => match event {
@@ -358,6 +406,15 @@ impl CallTask {
                     if let Some(deadline) = self.update_memberships(updates).await {
                         use_key.as_mut().reset(deadline);
                     }
+                }
+                result = share_result(&mut self.share_request), if self.share_request.is_some() => {
+                    if let Some((_, audio)) = self.share_request.take() {
+                        self.start_screen_share(result, audio, updates).await;
+                    }
+                }
+                () = screen_ended(&mut self.screen_ended) => {
+                    self.stop_screen_share().await;
+                    let _ = updates.send(Update::ScreenShare(false));
                 }
                 _ = heartbeat.tick() => self.restart_delayed_leave().await,
                 () = &mut use_key => {
@@ -495,13 +552,168 @@ impl CallTask {
         };
         let identity = ParticipantIdentity(self.own_identity.clone());
         key_provider.set_key(&identity, key.index.into(), key.key.clone());
+        self.own_key = key;
+        self.sync_key_index();
+        debug!("Now encrypting call media with key {}", self.own_key.index);
+    }
+
+    /// Make all our tracks use our current key.
+    ///
+    /// New tracks start with the key at index 0.
+    fn sync_key_index(&self) {
+        let identity = ParticipantIdentity(self.own_identity.clone());
         for ((participant, _), cryptor) in self.livekit.e2ee_manager().frame_cryptors() {
             if participant == identity {
-                cryptor.set_key_index(key.index.into());
+                cryptor.set_key_index(self.own_key.index.into());
             }
         }
-        debug!("Now encrypting call media with key {}", key.index);
-        self.own_key = key;
+    }
+
+    /// Ask the user what to share, unless we are already sharing.
+    fn request_screen_share(&mut self, audio: ShareAudio) {
+        if self.screen.is_some() || self.share_request.is_some() {
+            return;
+        }
+        self.share_request = Some((tokio::spawn(ScreenCapture::start()), audio));
+    }
+
+    /// Publish the screen capture the user chose.
+    async fn start_screen_share(
+        &mut self,
+        result: Result<Result<ScreenCapture, ScreenError>, JoinError>,
+        audio: ShareAudio,
+        updates: &mpsc::UnboundedSender<Update>,
+    ) {
+        let mut capture = match result {
+            Ok(Ok(capture)) => capture,
+            Ok(Err(ScreenError::Cancelled)) => {
+                let _ = updates.send(Update::ScreenShare(false));
+                return;
+            }
+            Ok(Err(error)) => {
+                warn!("Could not share screen: {error}");
+                let _ = updates.send(Update::ScreenShareFailed(error.to_string()));
+                return;
+            }
+            Err(error) => {
+                warn!("Screen sharing request crashed: {error}");
+                let _ = updates.send(Update::ScreenShareFailed(error.to_string()));
+                return;
+            }
+        };
+
+        let track = LocalVideoTrack::create_video_track(
+            "screen",
+            RtcVideoSource::Native(capture.source.clone()),
+        );
+        let pixels = u64::from(capture.resolution.width) * u64::from(capture.resolution.height);
+        let options = TrackPublishOptions {
+            source: TrackSource::Screenshare,
+            video_codec: VideoCodec::VP8,
+            simulcast: false,
+            // About 1.5 bits per pixel per second, so 3 Mb/s for 1080p.
+            video_encoding: Some(VideoEncoding {
+                max_bitrate: (pixels * 3 / 2).clamp(500_000, 3_000_000),
+                max_framerate: 30.0,
+            }),
+            ..Default::default()
+        };
+        let publication = match self
+            .livekit
+            .local_participant()
+            .publish_track(LocalTrack::Video(track), options)
+            .await
+        {
+            Ok(publication) => publication,
+            Err(error) => {
+                warn!("Could not publish screen: {error}");
+                capture.stop().await;
+                let _ = updates.send(Update::ScreenShareFailed(error.to_string()));
+                return;
+            }
+        };
+
+        self.screen_ended = capture.ended.take();
+        let mut share = ScreenShare {
+            capture,
+            tracks: vec![publication.sid()],
+            audio: None,
+            audio_pump: None,
+        };
+        if audio != ShareAudio::None
+            && let Err(error) = self.share_audio(&mut share, audio).await
+        {
+            warn!("Could not share screen sound: {error}");
+            let _ = updates.send(Update::ScreenShareFailed(error));
+        }
+        self.screen = Some(share);
+        self.sync_key_index();
+        let _ = updates.send(Update::ScreenShare(true));
+    }
+
+    /// Capture and publish the sound of other apps along with the screen.
+    async fn share_audio(&self, share: &mut ScreenShare, audio: ShareAudio) -> Result<(), String> {
+        let source = NativeAudioSource::new(
+            AudioSourceOptions {
+                echo_cancellation: false,
+                noise_suppression: false,
+                auto_gain_control: false,
+            },
+            app_audio::SAMPLE_RATE,
+            app_audio::CHANNELS,
+            0,
+        );
+        let (samples_tx, samples_rx) = mpsc::unbounded_channel::<Vec<i16>>();
+        let capture = AppAudioCapture::start(audio, move |samples| {
+            #[allow(clippy::cast_possible_truncation)]
+            let samples = samples
+                .iter()
+                .map(|sample| (sample.clamp(-1.0, 1.0) * f32::from(i16::MAX)) as i16)
+                .collect();
+            let _ = samples_tx.send(samples);
+        })?;
+        share.audio = Some(capture);
+        share.audio_pump = Some(tokio::spawn(pump_audio(source.clone(), samples_rx)));
+
+        let track =
+            LocalAudioTrack::create_audio_track("screen-audio", RtcAudioSource::Native(source));
+        let publication = self
+            .livekit
+            .local_participant()
+            .publish_track(
+                LocalTrack::Audio(track),
+                TrackPublishOptions {
+                    source: TrackSource::ScreenshareAudio,
+                    audio_encoding: Some(AudioEncoding {
+                        max_bitrate: 128_000,
+                    }),
+                    ..Default::default()
+                },
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        share.tracks.push(publication.sid());
+        Ok(())
+    }
+
+    /// Stop sharing the screen, if we are.
+    async fn stop_screen_share(&mut self) {
+        self.screen_ended = None;
+        let Some(share) = self.screen.take() else {
+            return;
+        };
+        for sid in &share.tracks {
+            if let Err(error) = self.livekit.local_participant().unpublish_track(sid).await {
+                debug!("Could not unpublish screen track: {error}");
+            }
+        }
+        // Stopping the capture ends the pump.
+        drop(share.audio);
+        if let Some(pump) = share.audio_pump {
+            let _ = pump.await;
+        }
+        share.capture.stop().await;
+        debug!("Stopped sharing the screen");
     }
 
     /// Use a key received from another participant.
@@ -556,7 +768,11 @@ impl CallTask {
     }
 
     /// Leave the call.
-    async fn leave(self) {
+    async fn leave(mut self) {
+        if let Some((request, _)) = self.share_request.take() {
+            request.abort();
+        }
+        self.stop_screen_share().await;
         if let Err(error) = self.livekit.close().await {
             debug!("Could not close LiveKit connection: {error}");
         }
@@ -567,6 +783,53 @@ impl CallTask {
             self.delay_id.as_deref(),
         )
         .await;
+    }
+}
+
+/// Wait for the screen capture the user is choosing.
+async fn share_result(
+    request: &mut Option<(JoinHandle<Result<ScreenCapture, ScreenError>>, ShareAudio)>,
+) -> Result<Result<ScreenCapture, ScreenError>, JoinError> {
+    match request {
+        Some((handle, _)) => handle.await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Wait until the screen capture stops by itself.
+async fn screen_ended(ended: &mut Option<oneshot::Receiver<()>>) {
+    let Some(receiver) = ended else {
+        return std::future::pending().await;
+    };
+    let result = receiver.await;
+    *ended = None;
+    if result.is_err() {
+        // The capture was dropped without ending by itself.
+        std::future::pending::<()>().await;
+    }
+}
+
+/// Send captured sound to `LiveKit` in 10 ms frames.
+async fn pump_audio(source: NativeAudioSource, mut samples_rx: mpsc::UnboundedReceiver<Vec<i16>>) {
+    let samples_per_channel = app_audio::SAMPLE_RATE / 100;
+    let frame_len = (samples_per_channel * app_audio::CHANNELS) as usize;
+    let mut pending = Vec::new();
+    while let Some(samples) = samples_rx.recv().await {
+        pending.extend_from_slice(&samples);
+        let mut start = 0;
+        while pending.len() - start >= frame_len {
+            let frame = AudioFrame {
+                data: Cow::Borrowed(&pending[start..start + frame_len]),
+                sample_rate: app_audio::SAMPLE_RATE,
+                num_channels: app_audio::CHANNELS,
+                samples_per_channel,
+            };
+            if let Err(error) = source.capture_frame(&frame).await {
+                debug!("Could not send screen sound: {error}");
+            }
+            start += frame_len;
+        }
+        pending.drain(..start);
     }
 }
 
