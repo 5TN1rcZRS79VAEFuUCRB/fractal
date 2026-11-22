@@ -8,6 +8,12 @@ on:
     tags: ["v*"]
   workflow_dispatch:
 
+# A newer push replaces a build still running for the same branch, but
+# never for a tag.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
 env:
   APP_ID: io.github._5TN1rcZRS79VAEFuUCRB.FractalPlus
   SITE_URL: https://5tn1rczrs79vaefuucrb.github.io/fractalplus
