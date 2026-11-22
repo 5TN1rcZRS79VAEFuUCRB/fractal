@@ -23,6 +23,22 @@ flatpak install --from https://5tn1rczrs79vaefuucrb.github.io/fractalplus/fracta
 Or download the `.flatpak` file from the [latest release](../../releases) and open it.
 Either way, Fractal+ then updates with `flatpak update` or in your software app.
 
+### Windows (test build)
+
+Download `fractalplus-windows-x86_64.zip` from the [latest release](../../releases), unzip it
+anywhere, and run `Fractal+\bin\fractalplus.exe`. The program isn't signed, so Windows may show
+"Windows protected your PC": click **More info**, then **Run anyway**.
+
+### macOS (test build, Apple silicon)
+
+Download `fractalplus-macos-arm64.dmg` from the [latest release](../../releases), open it and
+drag Fractal+ to Applications. The app isn't signed by Apple, so the first time, open it, click
+**Done** on the warning, then go to **System Settings → Privacy & Security** and click
+**Open Anyway** next to Fractal+.
+
+On Windows and macOS, screen sharing shares your whole main screen, and sharing sound from apps
+only works on Windows. Locations in messages show without a map on Windows.
+
 ## Requirements
 
 Your homeserver needs a call server set up (LiveKit with lk-jwt-service, the same setup Element
