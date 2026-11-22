@@ -18,6 +18,12 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # The release profile optimizes the whole program in one thread, which
+  # takes hours on these small runners. Trade a little speed and size for
+  # much shorter builds.
+  CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
+  CARGO_PROFILE_RELEASE_LTO: "false"
+  CARGO_PROFILE_RELEASE_DEBUG: "false"
   GTK_VERSION: "2026.10.0"
   GST_VERSION: "1.26.11"
 
