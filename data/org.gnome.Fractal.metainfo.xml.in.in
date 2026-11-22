@@ -75,6 +75,17 @@
   </content_rating>
 
   <releases>@development-release@
+    <release version="14.3.2" type="stable" date="2026-11-22">
+      <description>
+        <p>Video in calls, and test builds for Windows and macOS.</p>
+        <ul>
+          <li>See the cameras and shared screens of the other people in a call, and open them in their own window or full screen</li>
+          <li>Turn on your camera in calls</li>
+          <li>Screen sharing works inside the Flatpak, with the sound of your apps</li>
+          <li>First test builds for Windows and macOS (Apple silicon)</li>
+        </ul>
+      </description>
+    </release>
     <release version="14.3.1" type="stable" date="2026-11-21">
       <description>
         <p>The first release of Fractal+, based on Fractal 14.3.</p>

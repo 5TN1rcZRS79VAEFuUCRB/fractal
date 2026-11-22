@@ -1,7 +1,7 @@
 project(
     'fractal',
     'rust',
-    version: '14.3.1',
+    version: '14.3.2',
     license: 'GPL-3.0-or-later',
     meson_version: '>= 1.4',
 )
@@ -16,7 +16,7 @@ base_id = 'org.gnome.Fractal'
 application_id = 'io.github._5TN1rcZRS79VAEFuUCRB.FractalPlus'
 binary_name = 'fractalplus'
 
-major_version = '14.3.1'
+major_version = '14.3.2'
 pre_release_version = ''
 
 version = major_version
