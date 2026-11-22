@@ -57,6 +57,21 @@ done
 dylibbundler -of -b "${bundled[@]}" -d "$contents/libs" -p @executable_path/../libs/ \
   -s "$gst/lib" -s "$brew/lib" < /dev/null
 
+# dylibbundler can add its search path to a file twice, and macOS refuses to
+# load a library with a duplicate one, so keep only one of each.
+for file in "$contents/MacOS/fractalplus" "$contents"/lib/gstreamer-1.0/*.dylib \
+  "$contents"/libs/*.dylib; do
+  otool -l "$file" | awk '/cmd LC_RPATH/ {getline; getline; print $2}' | sort | uniq -d |
+    while read -r rpath; do
+      count=$(otool -l "$file" | awk '/cmd LC_RPATH/ {getline; getline; print $2}' |
+        grep -cxF "$rpath")
+      for _ in $(seq 2 "$count"); do
+        install_name_tool -delete_rpath "$rpath" "$file"
+      done
+      echo "Removed duplicate rpath $rpath from $file"
+    done
+done
+
 sed "s/@VERSION@/$(sed -n 's/^ *version: .\([0-9.a-z-]*\).,$/\1/p' meson.build | head -1)/" \
   "$here/Info.plist" > "$contents/Info.plist"
 if command -v rsvg-convert >/dev/null && command -v iconutil >/dev/null; then
