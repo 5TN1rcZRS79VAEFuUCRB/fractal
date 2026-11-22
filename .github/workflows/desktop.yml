@@ -55,6 +55,9 @@ jobs:
   windows:
     name: Build for Windows
     needs: data
+    # To attach the package to the release.
+    permissions:
+      contents: write
     runs-on: windows-latest
     defaults:
       run:
@@ -160,6 +163,9 @@ jobs:
   macos:
     name: Build for macOS
     needs: data
+    # To attach the package to the release.
+    permissions:
+      contents: write
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
