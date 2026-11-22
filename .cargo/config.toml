@@ -1,5 +1,16 @@
 [build]
 rustflags = ["--cfg", "ruma_identifiers_storage=\"ThinArc\""]
 
+# The flags of a target replace the build flags above, so they repeat them.
+# LiveKit's WebRTC library needs these, see LiveKit's rust-sdks.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["--cfg", "ruma_identifiers_storage=\"ThinArc\"", "-C", "target-feature=+crt-static"]
+
+[target.aarch64-apple-darwin]
+rustflags = ["--cfg", "ruma_identifiers_storage=\"ThinArc\"", "-C", "link-args=-ObjC -Wl,-headerpad_max_install_names"]
+
+[target.x86_64-apple-darwin]
+rustflags = ["--cfg", "ruma_identifiers_storage=\"ThinArc\"", "-C", "link-args=-ObjC -Wl,-headerpad_max_install_names"]
+
 [doc.extern-map.registries]
 crates-io = "https://docs.rs/"

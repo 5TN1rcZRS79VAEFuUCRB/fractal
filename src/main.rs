@@ -53,6 +53,9 @@ static MEDIA_FILE_NOTIFIER: LazyLock<OneshotNotifier> =
     LazyLock::new(|| OneshotNotifier::new("MEDIA_FILE_NOTIFIER"));
 
 fn main() {
+    #[cfg(not(target_os = "linux"))]
+    use_bundled_data();
+
     // Initialize logger, debug is carried out via debug!, info!, warn! and error!.
     // Default to the INFO level for this crate and WARN for everything else.
     // It can be overridden with the RUST_LOG environment variable.
@@ -99,6 +102,78 @@ fn main() {
 
     let app = Application::new();
     app.run();
+}
+
+/// Point GLib, GTK and `GStreamer` to the data and plugins next to the
+/// executable, in the Windows and macOS packages.
+///
+/// Windows finds most of them next to its libraries already, but macOS only
+/// looks in the system folders.
+#[cfg(not(target_os = "linux"))]
+fn use_bundled_data() {
+    use std::{env, ffi::OsString};
+
+    let Some(prefix) = env::current_exe()
+        .ok()
+        .and_then(|exe| Some(exe.parent()?.parent()?.to_owned()))
+    else {
+        return;
+    };
+    let share = prefix.join("share");
+    if !share.join("fractalplus").is_dir() {
+        // Not a package, e.g. run from the build folder.
+        return;
+    }
+
+    let mut vars: Vec<(&str, OsString)> = Vec::new();
+    // Icons and settings schemas.
+    let mut data_dirs = vec![share.clone()];
+    data_dirs.extend(
+        env::var_os("XDG_DATA_DIRS")
+            .iter()
+            .flat_map(env::split_paths),
+    );
+    if let Ok(data_dirs) = env::join_paths(data_dirs) {
+        vars.push(("XDG_DATA_DIRS", data_dirs));
+    }
+    vars.push((
+        "GSETTINGS_SCHEMA_DIR",
+        share.join("glib-2.0").join("schemas").into(),
+    ));
+    let plugins = prefix.join("lib").join("gstreamer-1.0");
+    if plugins.is_dir() {
+        vars.push(("GST_PLUGIN_SYSTEM_PATH_1_0", plugins.into()));
+        let scanner = prefix
+            .join("libexec")
+            .join("gstreamer-1.0")
+            .join(if cfg!(windows) {
+                "gst-plugin-scanner.exe"
+            } else {
+                "gst-plugin-scanner"
+            });
+        if scanner.is_file() {
+            vars.push(("GST_PLUGIN_SCANNER_1_0", scanner.into()));
+        } else {
+            // Look at the plugins in this process instead.
+            vars.push(("GST_REGISTRY_FORK", "no".into()));
+        }
+    }
+    let loaders = prefix.join("lib").join("gdk-pixbuf-2.0").join("2.10.0");
+    if loaders.join("loaders.cache").is_file() {
+        vars.push(("GDK_PIXBUF_MODULEDIR", loaders.join("loaders").into()));
+        vars.push((
+            "GDK_PIXBUF_MODULE_FILE",
+            loaders.join("loaders.cache").into(),
+        ));
+    }
+
+    for (name, value) in vars {
+        if name == "XDG_DATA_DIRS" || env::var_os(name).is_none() {
+            // Safety: nothing else runs yet, so nothing reads the environment
+            // at the same time.
+            unsafe { env::set_var(name, value) };
+        }
+    }
 }
 
 /// Resolve a data path from the build configuration.

@@ -1,0 +1,186 @@
+name: Windows and macOS
+
+# Build Fractal+ for Windows and macOS. The data files (resources,
+# translations, settings schema) are built on Linux, because their tools don't
+# run on the other systems, and the program is built with Cargo alone. For
+# tags, the packages are attached to the release.
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  GTK_VERSION: "2026.10.0"
+  GST_VERSION: "1.26.11"
+
+jobs:
+  data:
+    name: Build the data files
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    steps:
+      - name: Install the build tools
+        run: >
+          pacman -Syu --noconfirm --needed git meson rust gettext blueprint-compiler
+          desktop-file-utils appstream gtk4 libadwaita gtksourceview5 gstreamer
+          gst-plugins-base-libs gst-plugins-bad-libs glycin glycin-gtk4 libwebp libshumate
+          sqlite
+
+      - uses: actions/checkout@v4
+
+      - name: Build
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          build-aux/build-data.sh data
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: data
+          path: data
+
+  windows:
+    name: Build for Windows
+    needs: data
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: data
+          path: data
+
+      # The .pc files of the GTK bundle point to this folder.
+      - name: Install GTK
+        run: |
+          $gtk = "C:\gtk-build\gtk\x64\release"
+          curl.exe -sSfL -o gtk.zip "https://github.com/wingtk/gvsbuild/releases/download/$env:GTK_VERSION/GTK4_Gvsbuild_${env:GTK_VERSION}_x64.zip"
+          New-Item -ItemType Directory -Force $gtk | Out-Null
+          tar -xf gtk.zip -C $gtk
+          Remove-Item gtk.zip
+          "GTK_DIR=$gtk" >> $env:GITHUB_ENV
+
+      - name: Install GStreamer
+        run: |
+          $base = "https://gstreamer.freedesktop.org/data/pkg/windows/$env:GST_VERSION/msvc"
+          foreach ($name in "gstreamer-1.0-msvc-x86_64-$env:GST_VERSION.msi", "gstreamer-1.0-devel-msvc-x86_64-$env:GST_VERSION.msi") {
+            curl.exe -sSfL -o $name "$base/$name"
+            $p = Start-Process msiexec -Wait -PassThru -ArgumentList "/i", $name, "/qn", "INSTALLLEVEL=1000"
+            if ($p.ExitCode -ne 0) { throw "Could not install $name ($($p.ExitCode))" }
+            Remove-Item $name
+          }
+          $gst = [Environment]::GetEnvironmentVariable("GSTREAMER_1_0_ROOT_MSVC_X86_64", "Machine")
+          if (-not $gst) { $gst = "C:\Program Files\gstreamer\1.0\msvc_x86_64\" }
+          $gst = $gst.TrimEnd("\")
+          if (-not (Test-Path "$gst\lib\pkgconfig\gstreamer-1.0.pc")) { throw "GStreamer not found in $gst" }
+          "GST_DIR=$gst" >> $env:GITHUB_ENV
+
+      - name: Set up the build environment
+        run: |
+          choco install pkgconfiglite --no-progress -y
+          # GTK's GLib comes first, so there is only one, the newer one.
+          "PKG_CONFIG_PATH=$env:GTK_DIR\lib\pkgconfig;$env:GST_DIR\lib\pkgconfig" >> $env:GITHUB_ENV
+          "$env:GST_DIR\bin" >> $env:GITHUB_PATH
+          "$env:GTK_DIR\bin" >> $env:GITHUB_PATH
+          Copy-Item data\config.rs src\config.rs
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --release --locked --bin fractalplus
+
+      - name: Package
+        run: |
+          $out = "Fractal+"
+          New-Item -ItemType Directory "$out\bin", "$out\lib", "$out\libexec" | Out-Null
+          Copy-Item target\release\fractalplus.exe "$out\bin\"
+          # GStreamer first, then GTK over it, so only GTK's newer GLib and
+          # friends are left.
+          Copy-Item "$env:GST_DIR\bin\*.dll" "$out\bin\"
+          Copy-Item "$env:GTK_DIR\bin\*.dll" "$out\bin\" -Force
+          Copy-Item "$env:GTK_DIR\bin\gdbus.exe" "$out\bin\"
+          New-Item -ItemType Directory "$out\lib\gstreamer-1.0" | Out-Null
+          Copy-Item "$env:GST_DIR\lib\gstreamer-1.0\*.dll" "$out\lib\gstreamer-1.0\"
+          Copy-Item "$env:GST_DIR\libexec\gstreamer-1.0" "$out\libexec\" -Recurse
+          if (Test-Path "$env:GTK_DIR\lib\gdk-pixbuf-2.0") {
+            Copy-Item "$env:GTK_DIR\lib\gdk-pixbuf-2.0" "$out\lib\" -Recurse
+          }
+          Copy-Item "$env:GTK_DIR\share" "$out\" -Recurse -Exclude doc, gtk-doc, man, aclocal, gettext, vala, gir-1.0
+          Copy-Item data\share\* "$out\share\" -Recurse -Force
+          glib-compile-schemas "$out\share\glib-2.0\schemas"
+          Copy-Item README.md, COPYING "$out\" -ErrorAction SilentlyContinue
+          Compress-Archive -Path $out -DestinationPath fractalplus-windows-x86_64.zip
+
+      - name: Check that it starts
+        run: |
+          $env:RUST_LOG = "fractal=debug"
+          $p = Start-Process "Fractal+\bin\fractalplus.exe" -PassThru -RedirectStandardError start.log
+          Start-Sleep 20
+          if ($p.HasExited) { Get-Content start.log; throw "Fractal+ exited with $($p.ExitCode)" }
+          Stop-Process $p
+          Get-Content start.log | Select-Object -Last 30
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fractalplus-windows-x86_64
+          path: fractalplus-windows-x86_64.zip
+
+      - name: Attach to the release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: fractalplus-windows-x86_64.zip
+
+  macos:
+    name: Build for macOS
+    needs: data
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: data
+          path: data
+
+      - name: Install the libraries
+        run: |
+          brew install pkgconf gtk4 libadwaita gtksourceview5 libshumate gstreamer dylibbundler librsvg
+          cp data/config.rs src/config.rs
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --release --locked --bin fractalplus
+
+      - name: Package
+        run: build-aux/macos/package.sh target/release/fractalplus data
+
+      - name: Check that it starts
+        run: |
+          RUST_LOG=fractal=debug "Fractal+.app/Contents/MacOS/fractalplus" 2> start.log &
+          pid=$!
+          sleep 20
+          if ! kill -0 $pid 2>/dev/null; then cat start.log; exit 1; fi
+          kill $pid
+          tail -30 start.log
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fractalplus-macos-arm64
+          path: fractalplus-macos-arm64.dmg
+
+      - name: Attach to the release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: fractalplus-macos-arm64.dmg

@@ -172,3 +172,5 @@ shumate = { version = "0.8", features = ["v1_1"], package = "libshumate" }
 glycin-shim = { path = "shims/glycin" }
 glycin-gtk4-shim = { path = "shims/glycin-gtk4" }
 keyring = { version = "3", features = ["apple-native", "windows-native"] }
+# There is no system SQLite to link to there.
+libsqlite3-sys = { version = "0.38", features = ["bundled"] }
