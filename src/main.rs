@@ -29,6 +29,8 @@ mod session;
 mod session_list;
 mod session_view;
 mod system_settings;
+#[cfg(any(not(target_os = "linux"), test))]
+mod update_check;
 mod user_facing_error;
 mod utils;
 mod window;

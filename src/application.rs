@@ -152,7 +152,11 @@ mod imp {
             let window = if let Some(window) = self.obj().active_window().and_downcast() {
                 window
             } else {
-                Window::new(&self.obj())
+                let window = Window::new(&self.obj());
+                // Linux gets updates from Flatpak.
+                #[cfg(not(target_os = "linux"))]
+                crate::update_check::check_for_update(&window);
+                window
             };
 
             window.present();
