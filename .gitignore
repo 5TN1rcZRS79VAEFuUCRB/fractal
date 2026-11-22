@@ -20,3 +20,4 @@ target/
 src/config.rs
 hooks/checks-bin
 _build-data/
+fp-data/

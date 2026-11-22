@@ -33,12 +33,12 @@ jobs:
       - name: Build
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          build-aux/build-data.sh data
+          build-aux/build-data.sh fp-data
 
       - uses: actions/upload-artifact@v4
         with:
           name: data
-          path: data
+          path: fp-data
 
   windows:
     name: Build for Windows
@@ -53,7 +53,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: data
-          path: data
+          path: fp-data
 
       # The .pc files of the GTK bundle point to this folder.
       - name: Install GTK
@@ -90,7 +90,7 @@ jobs:
           Get-ChildItem "$env:GTK_DIR\lib\intl*", "$env:GTK_DIR\bin\intl*" | Select-Object -ExpandProperty Name
           "$env:GST_DIR\bin" >> $env:GITHUB_PATH
           "$env:GTK_DIR\bin" >> $env:GITHUB_PATH
-          Copy-Item data\config.rs src\config.rs
+          Copy-Item fp-data\config.rs src\config.rs
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -116,7 +116,7 @@ jobs:
             Copy-Item "$env:GTK_DIR\lib\gdk-pixbuf-2.0" "$out\lib\" -Recurse
           }
           Copy-Item "$env:GTK_DIR\share" "$out\" -Recurse -Exclude doc, gtk-doc, man, aclocal, gettext, vala, gir-1.0
-          Copy-Item data\share\* "$out\share\" -Recurse -Force
+          Copy-Item fp-data\share\* "$out\share\" -Recurse -Force
           glib-compile-schemas "$out\share\glib-2.0\schemas"
           Copy-Item README.md, COPYING "$out\" -ErrorAction SilentlyContinue
           Compress-Archive -Path $out -DestinationPath fractalplus-windows-x86_64.zip
@@ -151,12 +151,12 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: data
-          path: data
+          path: fp-data
 
       - name: Install the libraries
         run: |
           brew install pkgconf gtk4 libadwaita gtksourceview5 libshumate gstreamer gettext dylibbundler librsvg
-          cp data/config.rs src/config.rs
+          cp fp-data/config.rs src/config.rs
           echo "GETTEXT_DIR=$(brew --prefix gettext)" >> "$GITHUB_ENV"
 
       - uses: dtolnay/rust-toolchain@stable
@@ -167,7 +167,7 @@ jobs:
         run: cargo build --release --locked --bin fractal
 
       - name: Package
-        run: build-aux/macos/package.sh target/release/fractal data
+        run: build-aux/macos/package.sh target/release/fractal fp-data
 
       - name: Check that it starts
         run: |

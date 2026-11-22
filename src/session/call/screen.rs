@@ -30,6 +30,10 @@ const MAX_SIZE: (f64, f64) = (1920.0, 1080.0);
 
 /// An error while starting to capture the screen.
 #[derive(Debug, thiserror::Error)]
+#[cfg_attr(
+    not(target_os = "linux"),
+    allow(dead_code, reason = "only the portals give these errors")
+)]
 pub(super) enum ScreenError {
     #[error("cancelled")]
     Cancelled,

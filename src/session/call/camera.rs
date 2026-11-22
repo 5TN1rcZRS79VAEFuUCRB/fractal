@@ -23,6 +23,10 @@ const SIZE: (u32, u32) = (1280, 720);
 
 /// An error while starting the camera.
 #[derive(Debug, thiserror::Error)]
+#[cfg_attr(
+    not(target_os = "linux"),
+    allow(dead_code, reason = "only the portals give these errors")
+)]
 pub(super) enum CameraError {
     #[error("no camera found")]
     NoCamera,

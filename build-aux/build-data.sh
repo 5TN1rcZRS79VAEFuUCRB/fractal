@@ -14,6 +14,11 @@ meson setup "$build" -Dprofile=default --prefix=/ --wipe 2>/dev/null \
   || meson setup "$build" -Dprofile=default --prefix=/
 meson compile -C "$build" resources_gresource ui-resources_gresource fractalplus-gmo
 
+# Only replace an earlier output, never other files.
+if [ -e "$out" ] && ! [ -f "$out/config.rs" ]; then
+  echo "$out exists and is not an earlier output of this script" >&2
+  exit 1
+fi
 rm -rf "$out"
 mkdir -p "$out/share/fractalplus" "$out/share/glib-2.0/schemas" "$out/share/locale" \
   "$out/share/icons/hicolor/scalable/apps"

@@ -39,6 +39,13 @@ mod unimplemented {
     #[derive(Debug)]
     pub(crate) struct UnimplementedLocation;
 
+    impl UnimplementedLocation {
+        /// Create the location API.
+        pub(crate) fn new() -> Self {
+            Self
+        }
+    }
+
     impl LocationExt for UnimplementedLocation {
         /// Whether the location API is available.
         fn is_available(&self) -> bool {
@@ -47,12 +54,12 @@ mod unimplemented {
 
         /// Initialize the location API.
         async fn init(&self) -> Result<(), LocationError> {
-            unimplemented!()
+            Err(LocationError::Other)
         }
 
         /// Listen to a stream of location updates.
         async fn updates_stream(&self) -> Result<impl Stream<Item = GeoUri> + '_, LocationError> {
-            unimplemented!()
+            Err::<futures_util::stream::Empty<GeoUri>, _>(LocationError::Other)
         }
     }
 }
