@@ -85,6 +85,9 @@ jobs:
           choco install pkgconfiglite --no-progress -y
           # GTK's GLib comes first, so there is only one, the newer one.
           "PKG_CONFIG_PATH=$env:GTK_DIR\lib\pkgconfig;$env:GST_DIR\lib\pkgconfig" >> $env:GITHUB_ENV
+          # The GTK bundle has libintl for gettext.
+          "GETTEXT_DIR=$env:GTK_DIR" >> $env:GITHUB_ENV
+          Get-ChildItem "$env:GTK_DIR\lib\intl*", "$env:GTK_DIR\bin\intl*" | Select-Object -ExpandProperty Name
           "$env:GST_DIR\bin" >> $env:GITHUB_PATH
           "$env:GTK_DIR\bin" >> $env:GITHUB_PATH
           Copy-Item data\config.rs src\config.rs
@@ -152,8 +155,9 @@ jobs:
 
       - name: Install the libraries
         run: |
-          brew install pkgconf gtk4 libadwaita gtksourceview5 libshumate gstreamer dylibbundler librsvg
+          brew install pkgconf gtk4 libadwaita gtksourceview5 libshumate gstreamer gettext dylibbundler librsvg
           cp data/config.rs src/config.rs
+          echo "GETTEXT_DIR=$(brew --prefix gettext)" >> "$GITHUB_ENV"
 
       - uses: dtolnay/rust-toolchain@stable
 
