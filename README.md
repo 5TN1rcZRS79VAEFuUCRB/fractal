@@ -25,9 +25,14 @@ Either way, Fractal+ then updates with `flatpak update` or in your software app.
 
 ### Windows (test build)
 
-Download `fractalplus-windows-x86_64.zip` from the [latest release](../../releases), unzip it
-anywhere, and run `Fractal+\bin\fractalplus.exe`. The program isn't signed, so Windows may show
-"Windows protected your PC": click **More info**, then **Run anyway**.
+Download `fractalplus-windows-x86_64-setup.exe` from the [latest release](../../releases) and run
+it. It installs Fractal+ for your user only, with a Start menu entry, and doesn't need
+administrator rights. To update, run the setup of a newer version: Fractal+ tells you when one is
+out. The installer isn't signed, so Windows may show "Windows protected your PC": click
+**More info**, then **Run anyway**.
+
+If you'd rather not install anything, the `fractalplus-windows-x86_64.zip` has the same program:
+unzip it anywhere and run `Fractal+\bin\fractalplus.exe`.
 
 ### macOS (test build, Apple silicon)
 

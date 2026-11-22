@@ -38,7 +38,7 @@ jobs:
           pacman -Syu --noconfirm --needed git pkgconf meson rust gettext blueprint-compiler dart-sass
           desktop-file-utils appstream gtk4 libadwaita gtksourceview5 gstreamer
           gst-plugins-base-libs gst-plugins-bad-libs glycin glycin-gtk4 libwebp libshumate
-          sqlite
+          sqlite imagemagick librsvg
 
       - uses: actions/checkout@v4
 
@@ -46,6 +46,9 @@ jobs:
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           build-aux/build-data.sh fp-data
+          # The icon of the Windows installer and shortcuts.
+          magick -background none data/icons/org.gnome.Fractal.svg \
+            -define icon:auto-resize=256,64,48,32,16 fp-data/fractalplus.ico
 
       - uses: actions/upload-artifact@v4
         with:
@@ -136,29 +139,52 @@ jobs:
           Copy-Item README.md, COPYING "$out\" -ErrorAction SilentlyContinue
           Compress-Archive -Path $out -DestinationPath fractalplus-windows-x86_64.zip
 
+      - name: Make the installer
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            choco install innosetup --no-progress -y
+          }
+          $version = (Select-String -Path meson.build -Pattern "version: '([0-9.]+)'").Matches[0].Groups[1].Value
+          & $iscc "/DVersion=$version" "/DSourceDir=$PWD\Fractal+" "/DIconFile=$PWD\fp-data\fractalplus.ico" "/O$PWD" build-aux\windows\fractalplus.iss
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed" }
+
       - name: Check that it starts
         timeout-minutes: 5
         run: |
           $env:RUST_LOG = "fractal=debug"
           $env:RUST_BACKTRACE = "1"
-          $p = Start-Process "Fractal+\bin\fractalplus.exe" -PassThru -RedirectStandardOutput start.out -RedirectStandardError start.err
+          # Test the installed copy, which also tests the installer.
+          $setup = Start-Process .\fractalplus-windows-x86_64-setup.exe -Wait -PassThru -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/CURRENTUSER", "/NORESTART"
+          if ($setup.ExitCode -ne 0) { throw "The installer failed with $($setup.ExitCode)" }
+          $app = "$env:LOCALAPPDATA\Programs\Fractal+"
+          if (-not (Test-Path "$app\bin\fractalplus.exe")) { throw "Fractal+ was not installed in $app" }
+          if (-not (Test-Path "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Fractal+.lnk")) { throw "No Start menu shortcut" }
+          $p = Start-Process "$app\bin\fractalplus.exe" -PassThru -RedirectStandardOutput start.out -RedirectStandardError start.err
           Start-Sleep 20
           Get-Content start.out, start.err | Select-Object -Last 60
           if ($p.HasExited) { throw "Fractal+ exited with $('0x{0:X8}' -f $p.ExitCode)" }
           Stop-Process $p
           if (Select-String -Quiet "Failed to load plugin" start.out, start.err) { throw "A GStreamer plugin did not load" }
+          Start-Sleep 3
+          $uninstall = Start-Process "$app\unins000.exe" -Wait -PassThru -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"
+          if ($uninstall.ExitCode -ne 0) { throw "The uninstaller failed with $($uninstall.ExitCode)" }
 
       - uses: actions/upload-artifact@v4
         if: ${{ !cancelled() && hashFiles('fractalplus-windows-x86_64.zip') != '' }}
         with:
           name: fractalplus-windows-x86_64
-          path: fractalplus-windows-x86_64.zip
+          path: |
+            fractalplus-windows-x86_64-setup.exe
+            fractalplus-windows-x86_64.zip
 
       - name: Attach to the release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: fractalplus-windows-x86_64.zip
+          files: |
+            fractalplus-windows-x86_64-setup.exe
+            fractalplus-windows-x86_64.zip
 
   macos:
     name: Build for macOS
