@@ -75,6 +75,17 @@
   </content_rating>
 
   <releases>@development-release@
+    <release version="14.3.3" type="stable" date="2026-11-22">
+      <description>
+        <p>Clearer calls, and an installer for Windows.</p>
+        <ul>
+          <li>Every call shows in the conversation, with who started it. Calls of the older kind that Element makes in direct chats used to show as an empty space</li>
+          <li>After a crash during a call, Fractal+ leaves that call when it starts again, instead of still showing in it</li>
+          <li>Windows: a real installer with a Start menu entry, and no need for administrator rights</li>
+          <li>Windows and macOS: Fractal+ tells you when a newer version is out</li>
+        </ul>
+      </description>
+    </release>
     <release version="14.3.2" type="stable" date="2026-11-22">
       <description>
         <p>Video in calls, and test builds for Windows and macOS.</p>
