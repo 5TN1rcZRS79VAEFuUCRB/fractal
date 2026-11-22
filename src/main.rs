@@ -77,7 +77,26 @@ fn main() {
 
     // Prepare i18n
     // Safety: `setlocale` is safe to call because the program is single-threaded.
-    unsafe { setlocale(LocaleCategory::LcAll, "") };
+    #[cfg(target_os = "linux")]
+    unsafe {
+        setlocale(LocaleCategory::LcAll, "")
+    };
+    // gettext-rs uses the value of `LC_ALL` of glibc, which the C library of
+    // Windows rejects by aborting, so call it with the right value there.
+    #[cfg(not(target_os = "linux"))]
+    {
+        unsafe extern "C" {
+            fn setlocale(
+                category: std::ffi::c_int,
+                locale: *const std::ffi::c_char,
+            ) -> *mut std::ffi::c_char;
+        }
+        /// `LC_ALL` on Windows and macOS.
+        const LC_ALL: std::ffi::c_int = 0;
+        // Safety: the program is single-threaded, and the locale is a valid C
+        // string.
+        unsafe { setlocale(LC_ALL, c"".as_ptr()) };
+    }
     bindtextdomain(GETTEXT_PACKAGE, data_path(LOCALEDIR))
         .expect("Invalid argument passed to bindtextdomain");
     textdomain(GETTEXT_PACKAGE).expect("Invalid string passed to textdomain");

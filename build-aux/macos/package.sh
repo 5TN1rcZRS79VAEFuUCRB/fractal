@@ -52,7 +52,10 @@ for plugin in "${plugins[@]}"; do
 done
 
 # Copy the libraries and point the program and plugins to the copies.
-dylibbundler -of -b "${bundled[@]}" -d "$contents/libs" -p @executable_path/../libs/
+# Libraries found through @rpath are looked up in the search folders. Without
+# input, dylibbundler would ask forever for one it can't find.
+dylibbundler -of -b "${bundled[@]}" -d "$contents/libs" -p @executable_path/../libs/ \
+  -s "$gst/lib" -s "$brew/lib" < /dev/null
 
 sed "s/@VERSION@/$(sed -n 's/^ *version: .\([0-9.a-z-]*\).,$/\1/p' meson.build | head -1)/" \
   "$here/Info.plist" > "$contents/Info.plist"
