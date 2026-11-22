@@ -94,13 +94,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Build
-        run: cargo build --release --locked --bin fractalplus
+        run: cargo build --release --locked --bin fractal
 
       - name: Package
         run: |
           $out = "Fractal+"
           New-Item -ItemType Directory "$out\bin", "$out\lib", "$out\libexec" | Out-Null
-          Copy-Item target\release\fractalplus.exe "$out\bin\"
+          Copy-Item target\release\fractal.exe "$out\bin\fractalplus.exe"
           # GStreamer first, then GTK over it, so only GTK's newer GLib and
           # friends are left.
           Copy-Item "$env:GST_DIR\bin\*.dll" "$out\bin\"
@@ -160,10 +160,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Build
-        run: cargo build --release --locked --bin fractalplus
+        run: cargo build --release --locked --bin fractal
 
       - name: Package
-        run: build-aux/macos/package.sh target/release/fractalplus data
+        run: build-aux/macos/package.sh target/release/fractal data
 
       - name: Check that it starts
         run: |
