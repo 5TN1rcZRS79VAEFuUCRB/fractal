@@ -1,15 +1,16 @@
 # Fractal+
 
 An unofficial fork of [Fractal](https://gitlab.gnome.org/World/fractal), the GNOME Matrix app,
-that adds voice calls and screen sharing. It installs next to Fractal without replacing it.
+that adds voice and video calls and screen sharing. It installs next to Fractal without replacing it.
 
 Calls work with Element Call, so you can call people who use Element.
 
 ## Features
 
-- ✅ Encrypted group voice calls in any room
-- 🧪 Screen sharing with sound from your apps (new, not well tested yet)
-- 🚧 Camera video
+- ✅ Encrypted group calls in any room
+- 🧪 Camera video, and other people's cameras and shared screens (new)
+- 🧪 Screen sharing with sound from your apps (new)
+- Click a video to open it in its own window, which can go full screen (F11 or double-click)
 
 ## Install
 
