@@ -434,6 +434,10 @@ mod imp {
 
         /// Ask which sound to share with the screen.
         async fn choose_audio(&self) -> Option<ShareAudio> {
+            if cfg!(target_os = "macos") {
+                // macOS can't share sound yet, so there is nothing to choose.
+                return Some(ShareAudio::None);
+            }
             let apps = match gio::spawn_blocking(playing_apps).await {
                 Ok(Ok(apps)) => apps,
                 Ok(Err(error)) => {
@@ -493,10 +497,14 @@ mod imp {
                 .default_response("share")
                 .close_response("cancel")
                 .build();
-            dialog.add_responses(&[
-                ("cancel", &gettext("Cancel")),
-                ("share", &gettext("Choose Screen…")),
-            ]);
+            // Only Linux lets the user choose what to share; elsewhere it is
+            // the main screen.
+            let share = if cfg!(target_os = "linux") {
+                gettext("Choose Screen…")
+            } else {
+                gettext("Share")
+            };
+            dialog.add_responses(&[("cancel", &gettext("Cancel")), ("share", &share)]);
             dialog.set_response_appearance("share", adw::ResponseAppearance::Suggested);
 
             if dialog.choose_future(Some(&*self.obj())).await != "share" {
