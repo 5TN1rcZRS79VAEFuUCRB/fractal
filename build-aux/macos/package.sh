@@ -74,6 +74,17 @@ fi
 # unsigned code at all.
 codesign --force --deep --sign - "$app"
 
-hdiutil create -volname "Fractal+" -srcfolder "$app" -ov -format UDZO \
-  fractalplus-macos-arm64.dmg
+# hdiutil often fails with "Resource busy" on CI machines, so try again a
+# few times.
+for try in 1 2 3 4 5; do
+  if hdiutil create -volname "Fractal+" -srcfolder "$app" -ov -format UDZO \
+    fractalplus-macos-arm64.dmg; then
+    break
+  fi
+  if [ "$try" = 5 ]; then
+    exit 1
+  fi
+  echo "hdiutil failed, trying again"
+  sleep $((try * 5))
+done
 echo "Packaged fractalplus-macos-arm64.dmg"
