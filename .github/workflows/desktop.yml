@@ -23,7 +23,7 @@ jobs:
     steps:
       - name: Install the build tools
         run: >
-          pacman -Syu --noconfirm --needed git meson rust gettext blueprint-compiler
+          pacman -Syu --noconfirm --needed git pkgconf meson rust gettext blueprint-compiler
           desktop-file-utils appstream gtk4 libadwaita gtksourceview5 gstreamer
           gst-plugins-base-libs gst-plugins-bad-libs glycin glycin-gtk4 libwebp libshumate
           sqlite
