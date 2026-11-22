@@ -649,7 +649,7 @@ impl Event {
     pub(crate) fn is_call_event(&self) -> bool {
         matches!(
             self.item().content(),
-            TimelineItemContent::RtcNotification { .. }
+            TimelineItemContent::RtcNotification { .. } | TimelineItemContent::CallInvite
         )
     }
 

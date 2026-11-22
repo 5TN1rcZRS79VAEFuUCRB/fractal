@@ -603,27 +603,30 @@ pub(crate) fn incoming_call_notification_body(
     match message_event.original_content()? {
         AnyMessageLikeEventContent::RtcNotification(content) => {
             let body = match (content.call_intent, from_dm_room) {
-                (Some(CallIntent::Video), true) => {
-                    gettext("Incoming video call. Use another client to answer.")
-                }
+                (Some(CallIntent::Video), true) => gettext("Incoming video call."),
                 (Some(CallIntent::Video), false) => {
                     // Translators: Do NOT translate the content between '{' and '}', this
                     // is a variable name.
-                    gettext_f(
-                        "Incoming video call from {user}. Use another client to answer.",
-                        &[("user", sender_name)],
-                    )
+                    gettext_f("Incoming video call from {user}.", &[("user", sender_name)])
                 }
-                (_, true) => gettext("Incoming call. Use another client to answer."),
+                (_, true) => gettext("Incoming call."),
                 // Translators: Do NOT translate the content between '{' and '}', this
                 // is a variable name.
-                (_, false) => gettext_f(
-                    "Incoming call from {user}. Use another client to answer.",
-                    &[("user", sender_name)],
-                ),
+                (_, false) => gettext_f("Incoming call from {user}.", &[("user", sender_name)]),
             };
             Some(body)
         }
+        // A 1:1 call of the older kind, that we can't answer.
+        AnyMessageLikeEventContent::CallInvite(_) => Some(if from_dm_room {
+            gettext("Incoming call that Fractal+ can't answer. Start a call to call back.")
+        } else {
+            // Translators: Do NOT translate the content between '{' and '}', this
+            // is a variable name.
+            gettext_f(
+                "Incoming call from {user} that Fractal+ can't answer. Start a call to call back.",
+                &[("user", sender_name)],
+            )
+        }),
         _ => None,
     }
 }

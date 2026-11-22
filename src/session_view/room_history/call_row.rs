@@ -1,5 +1,4 @@
 use adw::{prelude::*, subclass::prelude::*};
-use as_variant::as_variant;
 use gettextrs::gettext;
 use gtk::{glib, glib::clone};
 use matrix_sdk_ui::timeline::TimelineItemContent;
@@ -28,7 +27,7 @@ mod imp {
         /// The text shown to the user.
         #[template_child]
         inner_label: TemplateChild<gtk::Label>,
-        /// The `RtcNotification` event displayed by this widget.
+        /// The call event displayed by this widget.
         #[property(get, set = Self::set_event, explicit_notify)]
         event: BoundObject<Event>,
         /// The sender of the event that is presented.
@@ -114,44 +113,65 @@ mod imp {
                 return;
             };
 
-            let call_intent = self.event.obj().and_then(|event| {
-                as_variant!(event.content(), TimelineItemContent::RtcNotification { call_intent, .. } => call_intent)?
-            });
-            if let Some(CallIntent::Video) = call_intent {
-                let text = if sender.is_own_user() {
-                    gettext("Outgoing video call.")
-                } else {
-                    gettext_f(
-                        // Translators: Do NOT translate the content between '{' and '}', this
-                        // is a variable name.
-                        "Incoming video call from {user}. Use another client to answer.",
-                        &[("user", &sender.disambiguated_name())],
-                    )
-                };
-
-                self.inner_label.set_text(&text);
-                self.icon.set_icon_name(Some("video-symbolic"));
-            } else {
-                let text = if sender.is_own_user() {
-                    gettext("Outgoing call.")
-                } else {
-                    gettext_f(
-                        // Translators: Do NOT translate the content between '{' and '}', this
-                        // is a variable name.
-                        "Incoming call from {user}. Use another client to answer.",
-                        &[("user", &sender.disambiguated_name())],
-                    )
-                };
-
-                self.inner_label.set_text(&text);
-                self.icon.set_icon_name(Some("phone-right-facing-symbolic"));
-            }
+            let Some(event) = self.event.obj() else {
+                return;
+            };
+            let name = sender.disambiguated_name();
+            let (text, icon) = match event.content() {
+                // A 1:1 call of the older kind, that we can't answer. Element
+                // Web still makes them in direct chats.
+                TimelineItemContent::CallInvite => {
+                    let text = if sender.is_own_user() {
+                        gettext("Outgoing call from another app.")
+                    } else {
+                        gettext_f(
+                            // Translators: Do NOT translate the content between '{' and '}',
+                            // this is a variable name.
+                            "{user} called with a kind of call that Fractal+ can't answer. Start a call to call them back.",
+                            &[("user", &name)],
+                        )
+                    };
+                    (text, "phone-right-facing-symbolic")
+                }
+                TimelineItemContent::RtcNotification {
+                    call_intent: Some(CallIntent::Video),
+                    ..
+                } => {
+                    let text = if sender.is_own_user() {
+                        gettext("Outgoing video call.")
+                    } else {
+                        gettext_f(
+                            // Translators: Do NOT translate the content between '{' and '}',
+                            // this is a variable name.
+                            "{user} started a video call.",
+                            &[("user", &name)],
+                        )
+                    };
+                    (text, "video-symbolic")
+                }
+                _ => {
+                    let text = if sender.is_own_user() {
+                        gettext("Outgoing call.")
+                    } else {
+                        gettext_f(
+                            // Translators: Do NOT translate the content between '{' and '}',
+                            // this is a variable name.
+                            "{user} started a call.",
+                            &[("user", &name)],
+                        )
+                    };
+                    (text, "phone-right-facing-symbolic")
+                }
+            };
+            self.inner_label.set_text(&text);
+            self.icon.set_icon_name(Some(icon));
         }
     }
 }
 
 glib::wrapper! {
-    /// A row showing an `m.rtc.notification` event ([MSC4075]) in the timeline.
+    /// A row showing a call in the timeline: an `m.rtc.notification` event
+    /// ([MSC4075]), or an older `m.call.invite`.
     ///
     /// [MSC4075]: https://github.com/matrix-org/matrix-spec-proposals/pull/4075
     pub struct CallRow(ObjectSubclass<imp::CallRow>)

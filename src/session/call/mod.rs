@@ -36,6 +36,40 @@ fn fake_media() -> bool {
     std::env::var_os("FRACTALPLUS_FAKE_MEDIA").is_some()
 }
 
+/// Leave the calls that this device is still a member of, which happens when
+/// Fractal+ crashed or was killed during a call, and the homeserver can't send
+/// our leave event by itself.
+///
+/// No call survives a restart, so it must be called once when the session
+/// starts, before joining any call.
+pub(crate) async fn leave_stale_calls(client: matrix_sdk::Client) {
+    let (Some(user_id), Some(device_id)) = (client.user_id(), client.device_id()) else {
+        return;
+    };
+    for room in client.joined_rooms() {
+        if !room
+            .clone_info()
+            .active_room_call_participants()
+            .iter()
+            .any(|participant| participant == user_id)
+        {
+            continue;
+        }
+        let stale = rtc::active_memberships(&room)
+            .await
+            .into_iter()
+            .any(|membership| membership.user_id == user_id && membership.device_id == device_id);
+        if !stale {
+            continue;
+        }
+        let state_key = rtc::membership_state_key(&room, user_id, device_id.as_str());
+        match rtc::send_membership(&room, &state_key, serde_json::json!({})).await {
+            Ok(()) => debug!("Left stale call in {}", room.room_id()),
+            Err(error) => error!("Could not leave stale call in {}: {error}", room.room_id()),
+        }
+    }
+}
+
 /// The state of a call.
 #[derive(Debug, Default, Hash, Eq, PartialEq, Clone, Copy, glib::Enum)]
 #[enum_type(name = "CallState")]

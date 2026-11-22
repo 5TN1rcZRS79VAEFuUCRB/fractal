@@ -1130,7 +1130,8 @@ fn show_in_timeline(
                 )
             }
             AnySyncMessageLikeEvent::Sticker(SyncMessageLikeEvent::Original(_))
-            | AnySyncMessageLikeEvent::RoomEncrypted(SyncMessageLikeEvent::Original(_)) => true,
+            | AnySyncMessageLikeEvent::RoomEncrypted(SyncMessageLikeEvent::Original(_))
+            | AnySyncMessageLikeEvent::CallInvite(SyncMessageLikeEvent::Original(_)) => true,
             AnySyncMessageLikeEvent::RtcNotification(SyncMessageLikeEvent::Original(ev)) => {
                 ev.sender == own_user_id
                     || ev.content.mentions.as_ref().is_some_and(|mentions| {

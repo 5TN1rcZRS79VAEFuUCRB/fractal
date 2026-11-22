@@ -544,6 +544,7 @@ mod imp {
                     if self.state.get() < SessionState::Ready {
                         self.set_state(SessionState::Ready);
                         self.init_notifications();
+                        spawn_tokio!(call::leave_stale_calls(self.client().clone()));
                     }
 
                     self.set_offline(false);
