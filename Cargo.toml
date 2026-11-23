@@ -174,3 +174,9 @@ glycin-gtk4-shim = { path = "shims/glycin-gtk4" }
 keyring = { version = "3", features = ["apple-native", "windows-native"] }
 # There is no system SQLite to link to there.
 libsqlite3-sys = { version = "0.38", features = ["bundled"] }
+
+# LiveKit's WebRTC bindings, with a volume for each remote audio track, so
+# people and shared screen audio can be turned up and down in calls.
+[patch.crates-io]
+libwebrtc = { path = "shims/libwebrtc" }
+webrtc-sys = { path = "shims/webrtc-sys" }

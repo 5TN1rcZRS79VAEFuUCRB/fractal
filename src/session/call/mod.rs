@@ -12,6 +12,7 @@ use gtk::{
     prelude::*,
     subclass::prelude::*,
 };
+use ruma::{OwnedUserId, UserId};
 use tokio::sync::mpsc;
 use tracing::{debug, error};
 
@@ -21,13 +22,25 @@ mod engine;
 mod rtc;
 mod screen;
 mod video;
+mod volume;
 
 use self::engine::{Command, Update};
 pub(crate) use self::{
     app_audio::{AudioApp, ShareAudio, playing_apps},
     video::{Video, VideoKind, VideoSink},
+    volume::{AudioKind, MAX_VOLUME, volume},
 };
 use crate::{prelude::*, session::Room, spawn, spawn_tokio};
+
+/// Another person we hear in a call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HeardPerson {
+    pub user_id: OwnedUserId,
+    /// Whether we hear their voice.
+    pub voice: bool,
+    /// Whether we hear the sound of the screen they share.
+    pub stream: bool,
+}
 
 /// Whether to send test patterns instead of the camera and screen.
 ///
@@ -121,6 +134,8 @@ mod imp {
         error: RefCell<Option<String>>,
         /// The videos in the call.
         pub(super) videos: RefCell<Vec<Video>>,
+        /// The other people we hear in the call.
+        pub(super) heard: RefCell<Vec<HeardPerson>>,
         /// The channel to send commands to the call task.
         pub(super) commands: RefCell<Option<mpsc::UnboundedSender<Command>>>,
     }
@@ -146,6 +161,8 @@ mod imp {
                         .build(),
                     // The videos in the call changed.
                     Signal::builder("videos-changed").build(),
+                    // The people we hear in the call changed.
+                    Signal::builder("heard-changed").build(),
                 ]
             });
             SIGNALS.as_ref()
@@ -198,6 +215,22 @@ mod imp {
                     if *self.speaking.borrow() != speaking {
                         self.speaking.replace(speaking);
                         obj.notify_speaking();
+                    }
+
+                    // Only the sound of other devices is played, ours too when we are in the
+                    // call twice.
+                    let heard = participants
+                        .into_iter()
+                        .filter(|participant| participant.voice || participant.stream)
+                        .map(|participant| HeardPerson {
+                            user_id: participant.user_id,
+                            voice: participant.voice,
+                            stream: participant.stream,
+                        })
+                        .collect::<Vec<_>>();
+                    if *self.heard.borrow() != heard {
+                        self.heard.replace(heard);
+                        obj.emit_by_name::<()>("heard-changed", &[]);
                     }
                 }
                 Update::ScreenShare(active) => {
@@ -384,6 +417,30 @@ impl Call {
             true,
             glib::closure_local!(move |obj: Self| f(&obj)),
         )
+    }
+
+    /// The other people we hear in the call.
+    pub(crate) fn heard(&self) -> Vec<HeardPerson> {
+        self.imp().heard.borrow().clone()
+    }
+
+    /// Connect to the signal emitted when the people we hear change.
+    pub(crate) fn connect_heard_changed<F: Fn(&Self) + 'static>(
+        &self,
+        f: F,
+    ) -> glib::SignalHandlerId {
+        self.connect_closure(
+            "heard-changed",
+            true,
+            glib::closure_local!(move |obj: Self| f(&obj)),
+        )
+    }
+
+    /// Set how loud we hear someone, as a factor from 0 to [`MAX_VOLUME`]. It
+    /// is kept for later calls too.
+    pub(crate) fn set_volume(&self, user_id: &UserId, kind: AudioKind, volume: f64) {
+        volume::set_volume(user_id, kind, volume);
+        self.imp().send(Command::UpdateVolumes);
     }
 
     /// Whether this call is still running.

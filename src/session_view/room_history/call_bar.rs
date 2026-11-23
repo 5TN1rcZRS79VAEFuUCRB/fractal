@@ -6,7 +6,11 @@ use tracing::warn;
 use super::call_video;
 use crate::{
     gettext_f, ngettext_f,
-    session::{AudioApp, Call, CallState, Room, Session, ShareAudio, playing_apps},
+    prelude::*,
+    session::{
+        AudioApp, AudioKind, Call, CallState, MAX_VOLUME, Room, Session, ShareAudio, playing_apps,
+        volume,
+    },
     spawn, toast,
 };
 
@@ -27,6 +31,7 @@ mod imp {
         revealer: OnceCell<gtk::Revealer>,
         status: OnceCell<gtk::Label>,
         mute_button: OnceCell<gtk::ToggleButton>,
+        volume_button: OnceCell<gtk::MenuButton>,
         camera_button: OnceCell<gtk::Button>,
         share_button: OnceCell<gtk::Button>,
         action_button: OnceCell<gtk::Button>,
@@ -55,6 +60,7 @@ mod imp {
 
     #[glib::derived_properties]
     impl ObjectImpl for CallBar {
+        #[allow(clippy::too_many_lines)]
         fn constructed(&self) {
             self.parent_constructed();
             let obj = self.obj();
@@ -79,6 +85,18 @@ mod imp {
                     button.set_tooltip_text(Some(&gettext("Mute")));
                 }
             });
+            let volume_popover = gtk::Popover::new();
+            volume_popover.connect_show(clone!(
+                #[weak(rename_to = imp)]
+                self,
+                move |popover| imp.fill_volumes(popover)
+            ));
+            let volume_button = gtk::MenuButton::builder()
+                .icon_name("audio-volume-high-symbolic")
+                .tooltip_text(gettext("Volume of People"))
+                .valign(gtk::Align::Center)
+                .popover(&volume_popover)
+                .build();
             let camera_button = gtk::Button::builder()
                 .icon_name("camera-web-symbolic")
                 .valign(gtk::Align::Center)
@@ -113,6 +131,7 @@ mod imp {
                 .build();
             content.append(&icon);
             content.append(&status);
+            content.append(&volume_button);
             content.append(&mute_button);
             content.append(&camera_button);
             content.append(&share_button);
@@ -148,6 +167,7 @@ mod imp {
             self.revealer.set(revealer).unwrap();
             self.status.set(status).unwrap();
             self.mute_button.set(mute_button).unwrap();
+            self.volume_button.set(volume_button).unwrap();
             self.camera_button.set(camera_button).unwrap();
             self.share_button.set(share_button).unwrap();
             self.action_button.set(action_button).unwrap();
@@ -261,6 +281,19 @@ mod imp {
                     #[weak(rename_to = imp)]
                     self,
                     move |_| imp.update_videos()
+                )));
+                handlers.push(call.connect_heard_changed(clone!(
+                    #[weak(rename_to = imp)]
+                    self,
+                    move |_| {
+                        imp.update();
+                        if let Some(popover) =
+                            imp.volume_button.get().and_then(gtk::MenuButton::popover)
+                            && popover.is_visible()
+                        {
+                            imp.fill_volumes(&popover);
+                        }
+                    }
                 )));
                 handlers.push(call.connect_camera_failed(clone!(
                     #[weak(rename_to = imp)]
@@ -517,6 +550,75 @@ mod imp {
         }
 
         /// Update the widgets for the current state.
+        /// Show a volume slider for each person we hear in the call.
+        fn fill_volumes(&self, popover: &gtk::Popover) {
+            let Some(call) = self.call.borrow().as_ref().map(|(call, _)| call.clone()) else {
+                popover.set_child(None::<&gtk::Widget>);
+                return;
+            };
+            let room = call.room();
+            let members = room.get_or_create_members();
+
+            let grid = gtk::Grid::builder()
+                .row_spacing(6)
+                .column_spacing(12)
+                .margin_start(6)
+                .margin_end(6)
+                .margin_top(6)
+                .margin_bottom(6)
+                .build();
+            let mut row = 0;
+            for person in call.heard() {
+                let name = gtk::Label::builder()
+                    .label(members.get_or_create(person.user_id.clone()).display_name())
+                    .xalign(0.0)
+                    .ellipsize(gtk::pango::EllipsizeMode::End)
+                    .max_width_chars(30)
+                    .css_classes(["heading"])
+                    .build();
+                if row > 0 {
+                    name.set_margin_top(6);
+                }
+                grid.attach(&name, 0, row, 2, 1);
+                row += 1;
+
+                let kinds = [
+                    (person.voice, AudioKind::Voice, gettext("Voice")),
+                    (person.stream, AudioKind::Stream, gettext("Screen Sound")),
+                ];
+                for (_, kind, label) in kinds.into_iter().filter(|(heard, ..)| *heard) {
+                    let label = gtk::Label::builder()
+                        .label(label)
+                        .xalign(0.0)
+                        .css_classes(["dim-label"])
+                        .build();
+                    let scale = gtk::Scale::with_range(
+                        gtk::Orientation::Horizontal,
+                        0.0,
+                        MAX_VOLUME * 100.0,
+                        5.0,
+                    );
+                    scale.set_width_request(220);
+                    scale.set_draw_value(true);
+                    scale.set_value_pos(gtk::PositionType::Right);
+                    scale.set_format_value_func(|_, value| format!("{value:.0}%"));
+                    scale.add_mark(100.0, gtk::PositionType::Bottom, None);
+                    scale.set_value(volume(&person.user_id, kind) * 100.0);
+                    let user_id = person.user_id.clone();
+                    scale.connect_value_changed(clone!(
+                        #[weak]
+                        call,
+                        move |scale| call.set_volume(&user_id, kind, scale.value() / 100.0)
+                    ));
+                    grid.attach(&label, 0, row, 1, 1);
+                    grid.attach(&scale, 1, row, 1, 1);
+                    row += 1;
+                }
+            }
+            popover.set_child(Some(&grid));
+        }
+
+        #[allow(clippy::too_many_lines)]
         fn update(&self) {
             let (
                 Some(revealer),
@@ -566,6 +668,11 @@ mod imp {
                     }
                 };
                 status.set_label(&text);
+                if let Some(volume_button) = self.volume_button.get() {
+                    volume_button.set_visible(
+                        call.state() == CallState::Connected && !call.heard().is_empty(),
+                    );
+                }
                 mute_button.set_visible(true);
                 camera_button.set_visible(call.state() == CallState::Connected);
                 camera_button.set_sensitive(!call.starting_camera());
@@ -610,6 +717,9 @@ mod imp {
                 count,
                 &[("n", &count.to_string())],
             ));
+            if let Some(volume_button) = self.volume_button.get() {
+                volume_button.set_visible(false);
+            }
             mute_button.set_visible(false);
             camera_button.set_visible(false);
             share_button.set_visible(false);

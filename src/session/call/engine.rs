@@ -41,6 +41,7 @@ use super::{
     rtc::{self, CALL_KEYS_EVENT_TYPE, DELAYED_LEAVE_RESTART, MediaKey, Membership, RtcError},
     screen::{ScreenCapture, ScreenError},
     video::{self, Video, VideoKind, VideoSink},
+    volume::{self, AudioKind},
 };
 
 /// How long to wait before using a new media key, so other participants
@@ -59,6 +60,8 @@ pub(super) enum Command {
     StopScreenShare,
     /// Turn the camera on or off.
     SetCamera(bool),
+    /// Apply the volumes of people again, after one changed.
+    UpdateVolumes,
     /// Leave the call.
     Leave,
 }
@@ -90,6 +93,10 @@ pub(super) struct Participant {
     pub user_id: OwnedUserId,
     /// Whether this participant is currently speaking.
     pub speaking: bool,
+    /// Whether we hear the voice of this participant.
+    pub voice: bool,
+    /// Whether we hear the sound of the screen this participant shares.
+    pub stream: bool,
 }
 
 /// Run a call in the given room until it is left or fails.
@@ -191,12 +198,29 @@ struct CallTask {
     screen_ended: Option<oneshot::Receiver<()>>,
     /// The videos of other participants, by track ID.
     remote_videos: HashMap<String, RemoteVideo>,
+    /// The sound of other participants, by track ID.
+    remote_audio: HashMap<String, RemoteAudio>,
     /// The camera being turned on.
     camera_request: Option<JoinHandle<Result<CameraCapture, CameraError>>>,
     /// Our camera, with the track we published for it.
     camera: Option<(CameraCapture, TrackSid)>,
     /// Resolves when the camera capture stops by itself.
     camera_ended: Option<oneshot::Receiver<()>>,
+}
+
+/// The voice or screen sound of another participant.
+struct RemoteAudio {
+    user_id: OwnedUserId,
+    kind: AudioKind,
+    track: RemoteAudioTrack,
+}
+
+impl RemoteAudio {
+    /// Play this track at the volume chosen for its sender.
+    fn apply_volume(&self) {
+        let volume = volume::volume(&self.user_id, self.kind);
+        self.track.rtc_track().set_volume(volume);
+    }
 }
 
 /// A video of another participant.
@@ -355,6 +379,7 @@ impl CallTask {
             screen: None,
             screen_ended: None,
             remote_videos: HashMap::new(),
+            remote_audio: HashMap::new(),
             camera_request: None,
             camera: None,
             camera_ended: None,
@@ -403,6 +428,11 @@ impl CallTask {
                         }
                         self.stop_camera(updates).await;
                     }
+                    Some(Command::UpdateVolumes) => {
+                        for audio in self.remote_audio.values() {
+                            audio.apply_volume();
+                        }
+                    }
                     Some(Command::Leave) | None => return Ok(()),
                 },
                 event = self.livekit_events.recv() => match event {
@@ -425,14 +455,23 @@ impl CallTask {
                             publication.source(),
                             participant.identity()
                         );
-                        if let RemoteTrack::Video(track) = track {
-                            self.add_remote_video(&track, &publication, &participant, updates);
+                        match track {
+                            RemoteTrack::Video(track) => {
+                                self.add_remote_video(&track, &publication, &participant, updates);
+                            }
+                            RemoteTrack::Audio(track) => {
+                                self.add_remote_audio(track, &publication, &participant, updates);
+                            }
                         }
                     }
                     Some(RoomEvent::TrackUnsubscribed { publication, .. }) => {
-                        if let Some(video) = self.remote_videos.remove(&publication.sid().to_string()) {
+                        let sid = publication.sid().to_string();
+                        if let Some(video) = self.remote_videos.remove(&sid) {
                             video.task.abort();
                             self.send_videos(updates);
+                        }
+                        if self.remote_audio.remove(&sid).is_some() {
+                            self.send_participants(updates);
                         }
                     }
                     Some(RoomEvent::TrackMuted { publication, .. }) => {
@@ -850,6 +889,50 @@ impl CallTask {
         let _ = updates.send(Update::Camera(false));
     }
 
+    /// The user of the given participant.
+    fn user_of(&self, participant: &RemoteParticipant) -> Option<OwnedUserId> {
+        let identity = participant.identity().to_string();
+        self.memberships
+            .iter()
+            .find(|membership| membership.identity == identity)
+            .map(|membership| membership.user_id.clone())
+            .or_else(|| {
+                // Identities are `@user:server:DEVICE`.
+                let (user_id, _) = identity.rsplit_once(':')?;
+                OwnedUserId::try_from(user_id).ok()
+            })
+    }
+
+    /// Play the voice or screen sound of another participant at its volume.
+    fn add_remote_audio(
+        &mut self,
+        track: RemoteAudioTrack,
+        publication: &RemoteTrackPublication,
+        participant: &RemoteParticipant,
+        updates: &mpsc::UnboundedSender<Update>,
+    ) {
+        let Some(user_id) = self.user_of(participant) else {
+            warn!(
+                "Unknown participant {}: its sound has no volume",
+                participant.identity()
+            );
+            return;
+        };
+        let kind = match publication.source() {
+            TrackSource::ScreenshareAudio => AudioKind::Stream,
+            _ => AudioKind::Voice,
+        };
+        let audio = RemoteAudio {
+            user_id,
+            kind,
+            track,
+        };
+        audio.apply_volume();
+        self.remote_audio
+            .insert(publication.sid().to_string(), audio);
+        self.send_participants(updates);
+    }
+
     /// Show a video track of another participant.
     fn add_remote_video(
         &mut self,
@@ -858,19 +941,11 @@ impl CallTask {
         participant: &RemoteParticipant,
         updates: &mpsc::UnboundedSender<Update>,
     ) {
-        let identity = participant.identity().to_string();
-        let user_id = self
-            .memberships
-            .iter()
-            .find(|membership| membership.identity == identity)
-            .map(|membership| membership.user_id.clone())
-            .or_else(|| {
-                // Identities are `@user:server:DEVICE`.
-                let (user_id, _) = identity.rsplit_once(':')?;
-                OwnedUserId::try_from(user_id).ok()
-            });
-        let Some(user_id) = user_id else {
-            warn!("Ignoring video of unknown participant {identity}");
+        let Some(user_id) = self.user_of(participant) else {
+            warn!(
+                "Ignoring video of unknown participant {}",
+                participant.identity()
+            );
             return;
         };
         let kind = match publication.source() {
@@ -990,7 +1065,19 @@ impl CallTask {
         }
         let mut participants = seen
             .into_iter()
-            .map(|(user_id, speaking)| Participant { user_id, speaking })
+            .map(|(user_id, speaking)| {
+                let has = |kind| {
+                    self.remote_audio
+                        .values()
+                        .any(|audio| audio.user_id == user_id && audio.kind == kind)
+                };
+                Participant {
+                    voice: has(AudioKind::Voice),
+                    stream: has(AudioKind::Stream),
+                    user_id,
+                    speaking,
+                }
+            })
             .collect::<Vec<_>>();
         participants.sort_by(|a, b| a.user_id.cmp(&b.user_id));
         let _ = updates.send(Update::Participants(participants));

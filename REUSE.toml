@@ -123,3 +123,13 @@ path = [
 SPDX-FileCopyrightText = "Maki icon set"
 SPDX-License-Identifier = "CC0-1.0"
 
+
+# LiveKit's WebRTC bindings, with a patch for remote track volumes.
+[[annotations]]
+path = [
+    "shims/libwebrtc/**",
+    "shims/webrtc-sys/**",
+]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "LiveKit, Inc."
+SPDX-License-Identifier = "Apache-2.0"

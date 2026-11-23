@@ -325,16 +325,13 @@ mod imp {
                 RecoveryState::Disabled if !security.backup_exists_on_server() => {
                     self.switch_to_recovery();
                 }
-                // The account has a backup but no recovery, which other clients allow. The
-                // only way to set up recovery here is to reset it, and the session is
-                // verified, so its keys come from the other session: never lead to a reset
-                // during setup. It can still be done in the account settings.
-                RecoveryState::Disabled => {
-                    self.emit_completed();
-                }
                 RecoveryState::Incomplete if !enable_only => {
                     self.switch_to_recovery();
                 }
+                // When the account has a backup but no recovery, which other clients allow,
+                // the only way to set up recovery here is to reset it. The session is
+                // verified, so its keys come from the other session: never lead to a reset
+                // during setup. It can still be done in the account settings.
                 _ => {
                     self.emit_completed();
                 }
