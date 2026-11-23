@@ -309,7 +309,7 @@ mod imp {
                 self.stack
                     .set_visible_child_name(SessionSetupPage::CryptoIdentity.name());
             } else {
-                self.switch_to_recovery();
+                self.check_recovery(true);
             }
         }
 
@@ -319,9 +319,18 @@ mod imp {
                 return;
             };
 
-            match session.security().recovery_state() {
-                RecoveryState::Disabled => {
+            let security = session.security();
+            match security.recovery_state() {
+                // Without a backup there is nothing to lose: offer to set up recovery.
+                RecoveryState::Disabled if !security.backup_exists_on_server() => {
                     self.switch_to_recovery();
+                }
+                // The account has a backup but no recovery, which other clients allow. The
+                // only way to set up recovery here is to reset it, and the session is
+                // verified, so its keys come from the other session: never lead to a reset
+                // during setup. It can still be done in the account settings.
+                RecoveryState::Disabled => {
+                    self.emit_completed();
                 }
                 RecoveryState::Incomplete if !enable_only => {
                     self.switch_to_recovery();

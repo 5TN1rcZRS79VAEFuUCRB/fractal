@@ -3,6 +3,8 @@
     html_favicon_url = "https://gitlab.gnome.org/World/fractal/-/raw/main/data/icons/org.gnome.Fractal-symbolic.svg?inline=false"
 )]
 #![recursion_limit = "256"]
+// No console window next to the app on Windows. Output still goes where it is redirected.
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 // Windows and macOS have no glycin: use the stand-in with the same API.
 #[cfg(not(target_os = "linux"))]
