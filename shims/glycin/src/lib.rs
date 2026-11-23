@@ -190,7 +190,9 @@ mod tests {
     use super::*;
 
     fn pixels() -> Vec<u8> {
-        (0..4 * 3).flat_map(|i| [i as u8 * 20, 100, 200, 255]).collect()
+        (0..4 * 3)
+            .flat_map(|i| [i as u8 * 20, 100, 200, 255])
+            .collect()
     }
 
     #[test]

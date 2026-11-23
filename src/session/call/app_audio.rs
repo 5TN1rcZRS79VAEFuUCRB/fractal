@@ -3,11 +3,11 @@
 //! On Windows, `GStreamer` captures the sound of the whole system except our
 //! own process. macOS can't share sound yet.
 //!
-//! On Linux, the capture itself runs in the `fractalplus-screen-audio` helper, because the
-//! WebRTC library linked into Fractal shadows the `PipeWire` functions. The
-//! helper links the chosen apps to its own capture stream, so the apps keep
-//! playing on their usual device, and our own sound (the other people in the
-//! call) is never captured, so they don't hear themselves.
+//! On Linux, the capture itself runs in the `fractalplus-screen-audio` helper,
+//! because the WebRTC library linked into Fractal shadows the `PipeWire`
+//! functions. The helper links the chosen apps to its own capture stream, so
+//! the apps keep playing on their usual device, and our own sound (the other
+//! people in the call) is never captured, so they don't hear themselves.
 
 #[cfg(target_os = "linux")]
 use std::{

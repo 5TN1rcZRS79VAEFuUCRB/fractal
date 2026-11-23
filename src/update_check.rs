@@ -2,7 +2,10 @@
 //! no package manager updates it (Windows and macOS).
 #![cfg_attr(
     target_os = "linux",
-    allow(dead_code, reason = "only used on Windows and macOS, built on Linux for the tests")
+    allow(
+        dead_code,
+        reason = "only used on Windows and macOS, built on Linux for the tests"
+    )
 )]
 
 use adw::prelude::*;
@@ -116,15 +119,11 @@ fn show_notice(window: &Window, version: &str, url: String) {
     let window_weak = window.downgrade();
     toast.connect_button_clicked(move |_| {
         let window = window_weak.upgrade();
-        gtk::UriLauncher::new(&url).launch(
-            window.as_ref(),
-            None::<&gio::Cancellable>,
-            |result| {
-                if let Err(error) = result {
-                    warn!("Could not open the download page: {error}");
-                }
-            },
-        );
+        gtk::UriLauncher::new(&url).launch(window.as_ref(), None::<&gio::Cancellable>, |result| {
+            if let Err(error) = result {
+                warn!("Could not open the download page: {error}");
+            }
+        });
     });
     window.add_toast(toast);
     debug!("Fractal+ {version} is available");

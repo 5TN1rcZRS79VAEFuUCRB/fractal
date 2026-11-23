@@ -70,8 +70,9 @@ fn main() {
         .with(fmt::layer().with_filter(env_filter))
         .init();
 
-    // Several crypto providers are enabled by our dependencies, so rustls cannot pick one for the
-    // connections that do not choose one themselves, like the LiveKit signalling for calls.
+    // Several crypto providers are enabled by our dependencies, so rustls cannot
+    // pick one for the connections that do not choose one themselves, like the
+    // LiveKit signalling for calls.
     if rustls::crypto::aws_lc_rs::default_provider()
         .install_default()
         .is_err()
