@@ -47,6 +47,9 @@ use super::{
 /// How long to wait before using a new media key, so other participants
 /// receive it before we start encrypting with it.
 const USE_KEY_DELAY: Duration = Duration::from_secs(1);
+/// How long to wait before connecting again to the server of other
+/// participants, after the connection failed or dropped.
+const SERVER_RETRY_DELAY: Duration = Duration::from_secs(10);
 
 /// A command sent to a running call.
 #[derive(Debug)]
@@ -167,6 +170,43 @@ impl OwnKey {
     }
 }
 
+/// Something that happened on a connection to the `LiveKit` server of other
+/// participants.
+enum ServerEvent {
+    Connected(Room),
+    Failed(CallError),
+    Event(Box<RoomEvent>),
+    Closed,
+}
+
+/// A connection to the `LiveKit` server that other participants publish to,
+/// only to receive what they publish there.
+struct RemoteServer {
+    /// Tells the events of this connection from those of an earlier one to
+    /// the same server.
+    id: u64,
+    /// The connection, once it is made.
+    livekit: Option<Room>,
+    /// The task making the connection and forwarding its events.
+    task: JoinHandle<()>,
+    /// The identities of who is speaking there.
+    speakers: HashSet<String>,
+    /// The IDs of the tracks we receive there.
+    tracks: HashSet<String>,
+}
+
+/// What a connection to the server of other participants needs.
+struct ServerConnection {
+    id: u64,
+    client: Client,
+    service_url: String,
+    room_id: String,
+    identity: String,
+    device_id: String,
+    key_provider: Option<KeyProvider>,
+    events_tx: mpsc::UnboundedSender<(u64, ServerEvent)>,
+}
+
 /// A connected call.
 struct CallTask {
     client: Client,
@@ -186,8 +226,18 @@ struct CallTask {
     /// The other devices in the call.
     memberships: HashSet<Membership>,
     speakers: HashSet<String>,
+    /// The JWT service of the `LiveKit` server we publish to.
+    service_url: String,
     livekit: Room,
     livekit_events: mpsc::UnboundedReceiver<RoomEvent>,
+    /// The connections to the servers other participants publish to, by JWT
+    /// service, when it is not ours.
+    servers: HashMap<String, RemoteServer>,
+    /// When we may connect again to servers whose connection failed.
+    server_retries: HashMap<String, tokio::time::Instant>,
+    next_server_id: u64,
+    server_events_tx: mpsc::UnboundedSender<(u64, ServerEvent)>,
+    server_events_rx: mpsc::UnboundedReceiver<(u64, ServerEvent)>,
     microphone: LocalAudioTrack,
     _audio: PlatformAudio,
     /// The screen capture the user is choosing, with the sound to share.
@@ -257,7 +307,8 @@ impl CallTask {
             .await
             .is_ok_and(|state| state.is_encrypted());
 
-        let service_url = rtc::discover_livekit_service_url(&client).await?;
+        let service_url =
+            rtc::normalize_service_url(&rtc::discover_livekit_service_url(&client).await?);
         info!("Joining call in {room_id} through {service_url} (encrypted: {encrypted})");
 
         // Listen for media keys before announcing ourselves, so we don't miss
@@ -356,6 +407,7 @@ impl CallTask {
             return Err(error.into());
         }
 
+        let (server_events_tx, server_events_rx) = mpsc::unbounded_channel();
         Ok(Self {
             client,
             room,
@@ -371,8 +423,14 @@ impl CallTask {
             _keys_handler: keys_handler,
             memberships: HashSet::new(),
             speakers: HashSet::new(),
+            service_url,
             livekit,
             livekit_events,
+            servers: HashMap::new(),
+            server_retries: HashMap::new(),
+            next_server_id: 0,
+            server_events_tx,
+            server_events_rx,
             microphone,
             _audio: audio,
             share_request: None,
@@ -403,6 +461,7 @@ impl CallTask {
         tokio::pin!(use_key);
 
         self.update_memberships(updates).await;
+        self.sync_servers(updates);
 
         loop {
             tokio::select! {
@@ -436,73 +495,29 @@ impl CallTask {
                     Some(Command::Leave) | None => return Ok(()),
                 },
                 event = self.livekit_events.recv() => match event {
-                    Some(RoomEvent::ActiveSpeakersChanged { speakers }) => {
-                        self.speakers = speakers
-                            .iter()
-                            .map(|participant| participant.identity().to_string())
-                            .collect();
-                        self.send_participants(updates);
-                    }
-                    Some(RoomEvent::ParticipantConnected(participant)) => {
-                        debug!("LiveKit participant connected: {}", participant.identity());
-                    }
-                    Some(RoomEvent::ParticipantDisconnected(participant)) => {
-                        debug!("LiveKit participant disconnected: {}", participant.identity());
-                    }
-                    Some(RoomEvent::TrackSubscribed { track, publication, participant }) => {
-                        debug!(
-                            "Subscribed to {:?} track of {}",
-                            publication.source(),
-                            participant.identity()
-                        );
-                        match track {
-                            RemoteTrack::Video(track) => {
-                                self.add_remote_video(&track, &publication, &participant, updates);
-                            }
-                            RemoteTrack::Audio(track) => {
-                                self.add_remote_audio(track, &publication, &participant, updates);
-                            }
-                        }
-                    }
-                    Some(RoomEvent::TrackUnsubscribed { publication, .. }) => {
-                        let sid = publication.sid().to_string();
-                        if let Some(video) = self.remote_videos.remove(&sid) {
-                            video.task.abort();
-                            self.send_videos(updates);
-                        }
-                        if self.remote_audio.remove(&sid).is_some() {
-                            self.send_participants(updates);
-                        }
-                    }
-                    Some(RoomEvent::TrackMuted { publication, .. }) => {
-                        self.set_video_muted(&publication.sid(), true, updates);
-                    }
-                    Some(RoomEvent::TrackUnmuted { publication, .. }) => {
-                        self.set_video_muted(&publication.sid(), false, updates);
-                    }
-                    Some(RoomEvent::TrackSubscriptionFailed { participant, error, .. }) => {
-                        warn!("Could not subscribe to track of {}: {error}", participant.identity());
-                    }
-                    Some(RoomEvent::E2eeStateChanged { participant, state }) => {
-                        debug!("Encryption state of {}: {state:?}", participant.identity());
-                    }
                     Some(RoomEvent::Disconnected { reason }) => {
                         debug!("LiveKit disconnected: {reason:?}");
                         return Err(CallError::Disconnected);
                     }
-                    Some(_) => {}
+                    Some(event) => self.handle_livekit_event(None, event, updates),
                     None => return Err(CallError::Disconnected),
                 },
+                Some((id, event)) = self.server_events_rx.recv() => {
+                    self.handle_server_event(id, event, updates);
+                }
                 Some(key) = self.keys_rx.recv() => self.add_remote_key(key),
                 Some(_) = room_info.next() => {
                     if let Some(deadline) = self.update_memberships(updates).await {
                         use_key.as_mut().reset(deadline);
                     }
+                    self.sync_servers(updates);
                 }
                 _ = refresh.tick() => {
                     if let Some(deadline) = self.update_memberships(updates).await {
                         use_key.as_mut().reset(deadline);
                     }
+                    // Also retries the servers we could not connect to.
+                    self.sync_servers(updates);
                 }
                 result = share_result(&mut self.share_request), if self.share_request.is_some() => {
                     if let Some((_, audio)) = self.share_request.take() {
@@ -525,6 +540,259 @@ impl CallTask {
                 }
             }
         }
+    }
+
+    /// Handle an event of the `LiveKit` server we publish to, or with `server`,
+    /// of the server other participants publish to.
+    fn handle_livekit_event(
+        &mut self,
+        server: Option<&str>,
+        event: RoomEvent,
+        updates: &mpsc::UnboundedSender<Update>,
+    ) {
+        let on = server.unwrap_or("our server");
+        match event {
+            RoomEvent::ActiveSpeakersChanged { speakers } => {
+                let speakers = speakers
+                    .iter()
+                    .map(|participant| participant.identity().to_string())
+                    .collect();
+                match server {
+                    None => self.speakers = speakers,
+                    Some(url) => {
+                        if let Some(server) = self.servers.get_mut(url) {
+                            server.speakers = speakers;
+                        }
+                    }
+                }
+                self.send_participants(updates);
+            }
+            RoomEvent::ParticipantConnected(participant) => {
+                debug!(
+                    "LiveKit participant connected on {on}: {}",
+                    participant.identity()
+                );
+            }
+            RoomEvent::ParticipantDisconnected(participant) => {
+                debug!(
+                    "LiveKit participant disconnected on {on}: {}",
+                    participant.identity()
+                );
+            }
+            RoomEvent::TrackSubscribed {
+                track,
+                publication,
+                participant,
+            } => {
+                debug!(
+                    "Subscribed to {:?} track of {} on {on}",
+                    publication.source(),
+                    participant.identity()
+                );
+                if let Some(url) = server
+                    && let Some(server) = self.servers.get_mut(url)
+                {
+                    server.tracks.insert(publication.sid().to_string());
+                }
+                match track {
+                    RemoteTrack::Video(track) => {
+                        self.add_remote_video(&track, &publication, &participant, updates);
+                    }
+                    RemoteTrack::Audio(track) => {
+                        self.add_remote_audio(track, &publication, &participant, updates);
+                    }
+                }
+            }
+            RoomEvent::TrackUnsubscribed { publication, .. } => {
+                let sid = publication.sid().to_string();
+                if let Some(url) = server
+                    && let Some(server) = self.servers.get_mut(url)
+                {
+                    server.tracks.remove(&sid);
+                }
+                self.remove_track(&sid, updates);
+            }
+            RoomEvent::TrackMuted { publication, .. } => {
+                self.set_video_muted(&publication.sid(), true, updates);
+            }
+            RoomEvent::TrackUnmuted { publication, .. } => {
+                self.set_video_muted(&publication.sid(), false, updates);
+            }
+            RoomEvent::TrackSubscriptionFailed {
+                participant, error, ..
+            } => {
+                warn!(
+                    "Could not subscribe to track of {} on {on}: {error}",
+                    participant.identity()
+                );
+            }
+            RoomEvent::E2eeStateChanged { participant, state } => {
+                debug!(
+                    "Encryption state of {} on {on}: {state:?}",
+                    participant.identity()
+                );
+            }
+            _ => {}
+        }
+    }
+
+    /// Stop playing or showing a track of another participant.
+    fn remove_track(&mut self, sid: &str, updates: &mpsc::UnboundedSender<Update>) {
+        if let Some(video) = self.remote_videos.remove(sid) {
+            video.task.abort();
+            self.send_videos(updates);
+        }
+        if self.remote_audio.remove(sid).is_some() {
+            self.send_participants(updates);
+        }
+    }
+
+    /// Connect to the servers that other participants publish to, and
+    /// disconnect from those nobody publishes to anymore.
+    ///
+    /// Each device publishes to the server of its own homeserver, so to hear
+    /// people from other homeservers, we receive from their servers too.
+    fn sync_servers(&mut self, updates: &mpsc::UnboundedSender<Update>) {
+        let wanted = self
+            .memberships
+            .iter()
+            .filter_map(|membership| membership.service_url.clone())
+            .filter(|url| *url != self.service_url)
+            .collect::<HashSet<_>>();
+        let unwanted = self
+            .servers
+            .keys()
+            .filter(|url| !wanted.contains(*url))
+            .cloned()
+            .collect::<Vec<_>>();
+        for url in unwanted {
+            debug!("Nobody in the call publishes to {url} anymore");
+            self.close_server(&url, updates);
+        }
+        let now = tokio::time::Instant::now();
+        self.server_retries.retain(|_, retry| *retry > now);
+        for url in wanted {
+            if !self.servers.contains_key(&url) && !self.server_retries.contains_key(&url) {
+                self.connect_server(url);
+            }
+        }
+    }
+
+    /// Start connecting to the server behind the given JWT service.
+    fn connect_server(&mut self, service_url: String) {
+        let id = self.next_server_id;
+        self.next_server_id += 1;
+        debug!("Connecting to the call server of {service_url} to receive media");
+        let task = tokio::spawn(run_server(ServerConnection {
+            id,
+            client: self.client.clone(),
+            service_url: service_url.clone(),
+            room_id: self.room_id.clone(),
+            identity: self.own_identity.clone(),
+            device_id: self.device_id.clone(),
+            key_provider: self.key_provider.clone(),
+            events_tx: self.server_events_tx.clone(),
+        }));
+        self.servers.insert(
+            service_url,
+            RemoteServer {
+                id,
+                livekit: None,
+                task,
+                speakers: HashSet::new(),
+                tracks: HashSet::new(),
+            },
+        );
+    }
+
+    /// Disconnect from the server behind the given JWT service, dropping what
+    /// we receive there.
+    fn close_server(&mut self, service_url: &str, updates: &mpsc::UnboundedSender<Update>) {
+        let Some(server) = self.servers.remove(service_url) else {
+            return;
+        };
+        server.task.abort();
+        for sid in &server.tracks {
+            self.remove_track(sid, updates);
+        }
+        if !server.speakers.is_empty() {
+            self.send_participants(updates);
+        }
+        if let Some(livekit) = server.livekit {
+            tokio::spawn(async move {
+                if let Err(error) = livekit.close().await {
+                    debug!("Could not close LiveKit connection: {error}");
+                }
+            });
+        }
+    }
+
+    /// Handle what happened on a connection to the server of other
+    /// participants.
+    fn handle_server_event(
+        &mut self,
+        id: u64,
+        event: ServerEvent,
+        updates: &mpsc::UnboundedSender<Update>,
+    ) {
+        let Some(url) = self
+            .servers
+            .iter()
+            .find(|(_, server)| server.id == id)
+            .map(|(url, _)| url.clone())
+        else {
+            // A connection we dropped.
+            if let ServerEvent::Connected(livekit) = event {
+                tokio::spawn(async move {
+                    let _ = livekit.close().await;
+                });
+            }
+            return;
+        };
+        match event {
+            ServerEvent::Connected(livekit) => {
+                info!("Receiving call media from the call server of {url}");
+                if let Some(server) = self.servers.get_mut(&url) {
+                    server.livekit = Some(livekit);
+                }
+            }
+            ServerEvent::Failed(error) => {
+                warn!("Could not connect to the call server of {url}: {error}");
+                self.retry_server(&url, updates);
+            }
+            ServerEvent::Event(event) if matches!(*event, RoomEvent::Disconnected { .. }) => {
+                if let RoomEvent::Disconnected { reason } = *event {
+                    debug!("The call server of {url} disconnected: {reason:?}");
+                }
+                self.retry_server(&url, updates);
+            }
+            ServerEvent::Event(event) => self.handle_livekit_event(Some(&url), *event, updates),
+            ServerEvent::Closed => {
+                debug!("The connection to the call server of {url} closed");
+                self.retry_server(&url, updates);
+            }
+        }
+    }
+
+    /// Drop the connection to the server behind the given JWT service, to
+    /// connect again after [`SERVER_RETRY_DELAY`] if someone still publishes
+    /// there.
+    fn retry_server(&mut self, service_url: &str, updates: &mpsc::UnboundedSender<Update>) {
+        self.close_server(service_url, updates);
+        self.server_retries.insert(
+            service_url.to_owned(),
+            tokio::time::Instant::now() + SERVER_RETRY_DELAY,
+        );
+    }
+
+    /// Whether the participant with the given identity is speaking, on any
+    /// server.
+    fn is_speaking(&self, identity: &str) -> bool {
+        self.speakers.contains(identity)
+            || self
+                .servers
+                .values()
+                .any(|server| server.speakers.contains(identity))
     }
 
     /// Reload the memberships, share our key with new devices and rotate it
@@ -1059,7 +1327,7 @@ impl CallTask {
             seen.insert(user_id.to_owned(), speaking);
         }
         for membership in &self.memberships {
-            let speaking = self.speakers.contains(&membership.identity);
+            let speaking = self.is_speaking(&membership.identity);
             let entry = seen.entry(membership.user_id.clone()).or_insert(false);
             *entry |= speaking;
         }
@@ -1097,6 +1365,14 @@ impl CallTask {
         }
         for (_, video) in self.remote_videos.drain() {
             video.task.abort();
+        }
+        for (_, server) in self.servers.drain() {
+            server.task.abort();
+            if let Some(livekit) = server.livekit
+                && let Err(error) = livekit.close().await
+            {
+                debug!("Could not close LiveKit connection: {error}");
+            }
         }
         if let Err(error) = self.livekit.close().await {
             debug!("Could not close LiveKit connection: {error}");
@@ -1164,6 +1440,61 @@ async fn pump_audio(source: NativeAudioSource, mut samples_rx: mpsc::UnboundedRe
         }
         pending.drain(..start);
     }
+}
+
+/// Connect to the server of other participants, only to receive, and forward
+/// what happens on the connection.
+async fn run_server(connection: ServerConnection) {
+    let ServerConnection {
+        id,
+        client,
+        service_url,
+        room_id,
+        identity,
+        device_id,
+        key_provider,
+        events_tx,
+    } = connection;
+
+    let connect = async {
+        let sfu =
+            rtc::get_subscriber_sfu_config(&client, &service_url, &room_id, &identity, &device_id)
+                .await?;
+        let mut options = RoomOptions::default();
+        options.auto_subscribe = true;
+        // The same keys as on our server: participants use one key for all.
+        options.encryption = key_provider.clone().map(|key_provider| E2eeOptions {
+            encryption_type: EncryptionType::Gcm,
+            key_provider,
+        });
+        let (livekit, events) = Room::connect(&sfu.url, &sfu.jwt, options).await?;
+        if key_provider.is_some() {
+            livekit.e2ee_manager().set_enabled(true);
+        }
+        Ok::<_, CallError>((livekit, events))
+    };
+    let (livekit, mut events) = match connect.await {
+        Ok(connection) => connection,
+        Err(error) => {
+            let _ = events_tx.send((id, ServerEvent::Failed(error)));
+            return;
+        }
+    };
+    if events_tx
+        .send((id, ServerEvent::Connected(livekit)))
+        .is_err()
+    {
+        return;
+    }
+    while let Some(event) = events.recv().await {
+        if events_tx
+            .send((id, ServerEvent::Event(Box::new(event))))
+            .is_err()
+        {
+            return;
+        }
+    }
+    let _ = events_tx.send((id, ServerEvent::Closed));
 }
 
 /// A deadline that never comes.

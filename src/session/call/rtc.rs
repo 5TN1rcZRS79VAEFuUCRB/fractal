@@ -39,6 +39,8 @@ const MEMBERSHIP_EXPIRES: Duration = Duration::from_hours(4);
 pub(super) const DELAYED_LEAVE_TIMEOUT: Duration = Duration::from_secs(8);
 /// How often we restart the delayed leave event.
 pub(super) const DELAYED_LEAVE_RESTART: Duration = Duration::from_secs(5);
+/// The `MatrixRTC` slot of a room call, as the JWT service wants it.
+const ROOM_CALL_SLOT: &str = "m.call#ROOM";
 
 /// An error during call signalling.
 #[derive(Debug, thiserror::Error)]
@@ -259,28 +261,71 @@ pub(super) async fn get_sfu_config(
     room_id: &str,
     device_id: &str,
 ) -> Result<SfuConfig, RtcError> {
+    let body = json!({
+        "room": room_id,
+        "device_id": device_id,
+        "openid_token": openid_token(client).await?,
+    });
+    request_sfu_config(client, service_url, "sfu/get", &body).await
+}
+
+/// Get a `LiveKit` access token from the JWT service of another
+/// participant, only to receive what they publish there.
+///
+/// Like Element Call, this uses the `/get_token` endpoint ([MSC4195]), which
+/// gives us a hashed participant identity that no membership matches, so
+/// nobody expects media from us there. It works on servers that are not our
+/// homeserver's, as long as someone from theirs is in the call.
+///
+/// [MSC4195]: https://github.com/matrix-org/matrix-spec-proposals/pull/4195
+pub(super) async fn get_subscriber_sfu_config(
+    client: &Client,
+    service_url: &str,
+    room_id: &str,
+    identity: &str,
+    device_id: &str,
+) -> Result<SfuConfig, RtcError> {
+    let user_id = client.user_id().ok_or(RtcError::NoTransport)?;
+    let body = json!({
+        "room_id": room_id,
+        "slot_id": ROOM_CALL_SLOT,
+        "openid_token": openid_token(client).await?,
+        "member": {
+            "id": identity,
+            "claimed_user_id": user_id,
+            "claimed_device_id": device_id,
+        },
+    });
+    request_sfu_config(client, service_url, "get_token", &body).await
+}
+
+/// An `OpenID` token proving who we are to a JWT service.
+async fn openid_token(client: &Client) -> Result<JsonValue, RtcError> {
     let user_id = client.user_id().ok_or(RtcError::NoTransport)?.to_owned();
     let openid = client
         .send(request_openid_token::v3::Request::new(user_id))
         .await?;
+    Ok(json!({
+        "access_token": openid.access_token,
+        "token_type": "Bearer",
+        "matrix_server_name": openid.matrix_server_name,
+        "expires_in": openid.expires_in.as_secs(),
+    }))
+}
 
-    let body = json!({
-        "room": room_id,
-        "device_id": device_id,
-        "openid_token": {
-            "access_token": openid.access_token,
-            "token_type": "Bearer",
-            "matrix_server_name": openid.matrix_server_name,
-            "expires_in": openid.expires_in.as_secs(),
-        },
-    });
-
-    let url = format!("{}/sfu/get", service_url.trim_end_matches('/'));
+/// Ask the JWT service at the given endpoint for a `LiveKit` access token.
+async fn request_sfu_config(
+    client: &Client,
+    service_url: &str,
+    endpoint: &str,
+    body: &JsonValue,
+) -> Result<SfuConfig, RtcError> {
+    let url = format!("{}/{endpoint}", service_url.trim_end_matches('/'));
     let response = client
         .http_client()
         .post(url)
         .header("Content-Type", "application/json")
-        .body(serde_json::to_vec(&body)?)
+        .body(serde_json::to_vec(body)?)
         .send()
         .await
         .map_err(|error| RtcError::Backend(error.to_string()))?;
@@ -299,6 +344,11 @@ pub(super) async fn get_sfu_config(
     Ok(serde_json::from_slice(&bytes)?)
 }
 
+/// The JWT service URL in a form that compares equal for the same service.
+pub(super) fn normalize_service_url(url: &str) -> String {
+    url.trim_end_matches('/').to_owned()
+}
+
 /// An active call membership of another device.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(super) struct Membership {
@@ -306,6 +356,9 @@ pub(super) struct Membership {
     pub device_id: OwnedDeviceId,
     /// The `LiveKit` participant identity of this membership.
     pub identity: String,
+    /// The JWT service of the `LiveKit` server this device publishes to, if
+    /// it says.
+    pub service_url: Option<String>,
 }
 
 /// The active room call memberships in the given room.
@@ -326,6 +379,7 @@ pub(super) async fn active_memberships(room: &MatrixRoom) -> Vec<Membership> {
         created_ts: Option<u64>,
         #[serde(rename = "membershipID")]
         membership_id: Option<String>,
+        foci_preferred: Option<Vec<JsonValue>>,
     }
 
     let events = match room
@@ -371,10 +425,20 @@ pub(super) async fn active_memberships(room: &MatrixRoom) -> Vec<Membership> {
             let identity = content
                 .membership_id
                 .unwrap_or_else(|| participant_identity(&event.sender, device_id.as_str()));
+            // Each device publishes to the first `LiveKit` server it prefers
+            // ("multi_sfu"), usually its homeserver's.
+            let service_url = content
+                .foci_preferred
+                .iter()
+                .flatten()
+                .find(|focus| focus.get("type").and_then(JsonValue::as_str) == Some("livekit"))
+                .and_then(|focus| focus.get("livekit_service_url")?.as_str())
+                .map(normalize_service_url);
             Some(Membership {
                 user_id: event.sender,
                 device_id,
                 identity,
+                service_url,
             })
         })
         .collect()
