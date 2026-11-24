@@ -207,13 +207,19 @@ mod imp {
                         self,
                         move |session| imp.watch_call(session.call())
                     ));
-                    self.watch_call(session.call());
                     self.session.replace(Some((session, handler)));
                 }
             }
-
             self.room.replace(room);
-            self.update();
+
+            // Only now that we have the new room, because the call is kept only
+            // if it is in our room.
+            let call = self
+                .session
+                .borrow()
+                .as_ref()
+                .and_then(|(session, _)| session.call());
+            self.watch_call(call);
             self.obj().notify_room();
         }
 
