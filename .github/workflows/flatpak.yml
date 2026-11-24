@@ -11,6 +11,10 @@ on:
 
 env:
   APP_ID: io.github._5TN1rcZRS79VAEFuUCRB.FractalPlus
+  # Inside the build container, so the signing key is gone after each job.
+  # Our runner keeps the container's home between jobs, with a lock that
+  # blocks the next job's import.
+  GNUPGHOME: /tmp/gnupg
   SITE_URL: https://5tn1rczrs79vaefuucrb.github.io/fractalplus
   GPG_FINGERPRINT: 98A45761F7114062A0D0510F29A4EE8A207C1B58
 
@@ -38,7 +42,9 @@ jobs:
       - name: Import the repository signing key
         env:
           FLATPAK_GPG_KEY: ${{ secrets.FLATPAK_GPG_KEY }}
-        run: echo "$FLATPAK_GPG_KEY" | gpg --batch --import
+        run: |
+          install -d -m 700 "$GNUPGHOME"
+          echo "$FLATPAK_GPG_KEY" | gpg --batch --import
 
       - uses: flathub-infra/flatpak-github-actions/flatpak-builder@master
         with:
