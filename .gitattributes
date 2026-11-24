@@ -8,3 +8,6 @@ build-aux/org.gnome.Fractal.json export-ignore
 hooks export-ignore
 .rustfmt.toml export-ignore
 .typos.toml export-ignore
+
+# Vendored crates, patched: not ours, so GitHub leaves them out of the languages.
+shims/** linguist-vendored
