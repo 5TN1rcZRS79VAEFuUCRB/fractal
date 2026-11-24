@@ -34,8 +34,8 @@ mod verification;
 
 pub(crate) use self::{
     call::{
-        AudioApp, AudioKind, Call, CallState, MAX_VOLUME, ShareAudio, Video, VideoKind, VideoSink,
-        playing_apps, volume,
+        AudioApp, AudioKind, Call, CallPerson, CallState, MAX_VOLUME, ShareAudio, Video, VideoKind,
+        VideoSink, playing_apps, volume,
     },
     global_account_data::*,
     ignored_users::*,

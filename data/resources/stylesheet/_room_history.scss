@@ -489,3 +489,29 @@ button.send-text-message-button image {
 .composer-replacement {
   margin: 12px;
 }
+
+// The tiles of the people in a call, in the call bar.
+.card.call-tile {
+  outline: 3px solid transparent;
+  outline-offset: -3px;
+  transition: outline-color 150ms ease-out;
+
+  &.speaking {
+    outline-color: var(--success-color);
+  }
+
+  .call-avatar {
+    border-radius: 9999px;
+    box-shadow: 0 0 0 3px transparent;
+    transition: box-shadow 150ms ease-out;
+  }
+
+  &.speaking .call-avatar {
+    box-shadow: 0 0 0 3px var(--success-color);
+  }
+
+  .call-tile-badge {
+    border-radius: 9999px;
+    padding: 4px;
+  }
+}

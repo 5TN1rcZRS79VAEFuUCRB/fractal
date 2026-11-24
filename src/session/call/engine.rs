@@ -92,6 +92,7 @@ pub(super) enum Update {
 
 /// A participant in a call.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)]
 pub(super) struct Participant {
     pub user_id: OwnedUserId,
     /// Whether this participant is currently speaking.
@@ -100,6 +101,8 @@ pub(super) struct Participant {
     pub voice: bool,
     /// Whether we hear the sound of the screen this participant shares.
     pub stream: bool,
+    /// Whether this participant's microphone is muted, or not sent at all.
+    pub muted: bool,
 }
 
 /// Run a call in the given room until it is left or fails.
@@ -263,6 +266,8 @@ struct RemoteAudio {
     user_id: OwnedUserId,
     kind: AudioKind,
     track: RemoteAudioTrack,
+    /// Whether the sender muted it for now.
+    muted: bool,
 }
 
 impl RemoteAudio {
@@ -466,8 +471,14 @@ impl CallTask {
         loop {
             tokio::select! {
                 command = commands.recv() => match command {
-                    Some(Command::SetMuted(true)) => self.microphone.mute(),
-                    Some(Command::SetMuted(false)) => self.microphone.unmute(),
+                    Some(Command::SetMuted(true)) => {
+                        self.microphone.mute();
+                        self.send_participants(updates);
+                    }
+                    Some(Command::SetMuted(false)) => {
+                        self.microphone.unmute();
+                        self.send_participants(updates);
+                    }
                     Some(Command::StartScreenShare(audio)) => self.request_screen_share(audio),
                     Some(Command::StopScreenShare) => {
                         if let Some((request, _)) = self.share_request.take() {
@@ -613,10 +624,10 @@ impl CallTask {
                 self.remove_track(&sid, updates);
             }
             RoomEvent::TrackMuted { publication, .. } => {
-                self.set_video_muted(&publication.sid(), true, updates);
+                self.set_track_muted(&publication.sid(), true, updates);
             }
             RoomEvent::TrackUnmuted { publication, .. } => {
-                self.set_video_muted(&publication.sid(), false, updates);
+                self.set_track_muted(&publication.sid(), false, updates);
             }
             RoomEvent::TrackSubscriptionFailed {
                 participant, error, ..
@@ -1194,6 +1205,7 @@ impl CallTask {
             user_id,
             kind,
             track,
+            muted: publication.is_muted(),
         };
         audio.apply_volume();
         self.remote_audio
@@ -1243,18 +1255,26 @@ impl CallTask {
         self.send_videos(updates);
     }
 
-    /// Hide or show a video that its sender turned off or on.
-    fn set_video_muted(
+    /// Hide or show a video that its sender turned off or on, or note that
+    /// a sender muted or unmuted its sound.
+    fn set_track_muted(
         &mut self,
         sid: &TrackSid,
         muted: bool,
         updates: &mpsc::UnboundedSender<Update>,
     ) {
-        if let Some(video) = self.remote_videos.get_mut(&sid.to_string())
+        let sid = sid.to_string();
+        if let Some(video) = self.remote_videos.get_mut(&sid)
             && video.muted != muted
         {
             video.muted = muted;
             self.send_videos(updates);
+        }
+        if let Some(audio) = self.remote_audio.get_mut(&sid)
+            && audio.muted != muted
+        {
+            audio.muted = muted;
+            self.send_participants(updates);
         }
     }
 
@@ -1320,11 +1340,12 @@ impl CallTask {
     /// Tell the UI who is in the call.
     fn send_participants(&self, updates: &mpsc::UnboundedSender<Update>) {
         let mut seen = HashMap::new();
-        if let Some(user_id) = self.client.user_id() {
+        let own_user_id = self.client.user_id().map(ToOwned::to_owned);
+        if let Some(user_id) = &own_user_id {
             let speaking = self
                 .speakers
                 .contains(&self.livekit.local_participant().identity().to_string());
-            seen.insert(user_id.to_owned(), speaking);
+            seen.insert(user_id.clone(), speaking);
         }
         for membership in &self.memberships {
             let speaking = self.is_speaking(&membership.identity);
@@ -1339,9 +1360,17 @@ impl CallTask {
                         .values()
                         .any(|audio| audio.user_id == user_id && audio.kind == kind)
                 };
+                let muted = if own_user_id.as_ref() == Some(&user_id) {
+                    self.microphone.is_muted()
+                } else {
+                    !self.remote_audio.values().any(|audio| {
+                        audio.user_id == user_id && audio.kind == AudioKind::Voice && !audio.muted
+                    })
+                };
                 Participant {
                     voice: has(AudioKind::Voice),
                     stream: has(AudioKind::Stream),
+                    muted,
                     user_id,
                     speaking,
                 }

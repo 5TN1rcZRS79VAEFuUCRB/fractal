@@ -3,8 +3,10 @@
 use adw::{prelude::*, subclass::prelude::*};
 use gettextrs::gettext;
 use gtk::{gdk, glib, glib::clone, graphene, gsk};
+use ruma::UserId;
 
 use crate::{
+    components::Avatar,
     gettext_f,
     prelude::*,
     session::{Room, Video, VideoKind, VideoSink},
@@ -199,6 +201,108 @@ pub(super) fn tile(title: &str, video: &Video, on_open: impl Fn() + 'static) -> 
     });
     overlay.add_controller(click);
     overlay.upcast()
+}
+
+/// What to do when a video tile is clicked.
+pub(super) type OnOpen = Box<dyn Fn()>;
+
+/// A tile for someone in the call, us included: their camera when it is on,
+/// else their avatar, with their name, a ring while they speak, and whether
+/// they are muted.
+#[derive(Debug)]
+pub(super) struct PersonTile {
+    widget: gtk::Overlay,
+    muted_icon: gtk::Image,
+}
+
+impl PersonTile {
+    /// Create a tile for the given person, with their camera video if it is
+    /// on, which opens in a window when clicked.
+    pub(super) fn new(
+        room: &Room,
+        user_id: &UserId,
+        own: bool,
+        camera: Option<(&Video, OnOpen)>,
+    ) -> Self {
+        let member = room
+            .get_or_create_members()
+            .get_or_create(user_id.to_owned());
+        let name = gtk::Label::builder()
+            .ellipsize(gtk::pango::EllipsizeMode::End)
+            .halign(gtk::Align::Start)
+            .valign(gtk::Align::End)
+            .margin_start(6)
+            .margin_end(40)
+            .margin_bottom(6)
+            .css_classes(["osd", "caption"])
+            .build();
+        if own {
+            name.set_label(&gettext("You"));
+        } else {
+            member
+                .bind_property("display-name", &name, "label")
+                .sync_create()
+                .build();
+        }
+        let muted_icon = gtk::Image::builder()
+            .icon_name("microphone-disabled-symbolic")
+            .tooltip_text(gettext("Muted"))
+            .halign(gtk::Align::End)
+            .valign(gtk::Align::End)
+            .margin_end(6)
+            .margin_bottom(6)
+            .css_classes(["osd", "call-tile-badge"])
+            .visible(false)
+            .build();
+
+        let widget = gtk::Overlay::builder()
+            .width_request(256)
+            .height_request(144)
+            .overflow(gtk::Overflow::Hidden)
+            .css_classes(["card", "call-tile"])
+            .build();
+        if let Some((video, on_open)) = camera {
+            widget.set_child(Some(&VideoView::new(&video.sink, video.local)));
+            widget.set_tooltip_text(Some(&gettext("Open in a Window")));
+            widget.set_cursor(gdk::Cursor::from_name("pointer", None).as_ref());
+            let click = gtk::GestureClick::new();
+            click.connect_released(move |gesture, _, _, _| {
+                gesture.set_state(gtk::EventSequenceState::Claimed);
+                on_open();
+            });
+            widget.add_controller(click);
+        } else {
+            let avatar = Avatar::new();
+            avatar.set_data(Some(member.avatar_data()));
+            avatar.set_size(64);
+            let ring = adw::Bin::builder()
+                .child(&avatar)
+                .halign(gtk::Align::Center)
+                .valign(gtk::Align::Center)
+                .css_classes(["call-avatar"])
+                .build();
+            widget.set_child(Some(&ring));
+        }
+        widget.add_overlay(&name);
+        widget.add_overlay(&muted_icon);
+
+        Self { widget, muted_icon }
+    }
+
+    /// The widget of this tile.
+    pub(super) fn widget(&self) -> &gtk::Widget {
+        self.widget.upcast_ref()
+    }
+
+    /// Show whether this person is speaking and whether they are muted.
+    pub(super) fn update(&self, speaking: bool, muted: bool) {
+        if speaking {
+            self.widget.add_css_class("speaking");
+        } else {
+            self.widget.remove_css_class("speaking");
+        }
+        self.muted_icon.set_visible(muted);
+    }
 }
 
 /// Open a window showing a video big, which can be made full screen.

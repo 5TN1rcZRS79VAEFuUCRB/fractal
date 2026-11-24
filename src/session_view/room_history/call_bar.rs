@@ -3,16 +3,34 @@ use gettextrs::gettext;
 use gtk::{gio, glib, glib::clone};
 use tracing::warn;
 
-use super::call_video;
+use super::call_video::{self, PersonTile};
 use crate::{
     gettext_f, ngettext_f,
     prelude::*,
     session::{
-        AudioApp, AudioKind, Call, CallState, MAX_VOLUME, Room, Session, ShareAudio, playing_apps,
-        volume,
+        AudioApp, AudioKind, Call, CallPerson, CallState, MAX_VOLUME, Room, Session, ShareAudio,
+        Video, VideoKind, playing_apps, volume,
     },
     spawn, toast,
 };
+
+/// A tile in the call bar.
+#[derive(Debug)]
+enum Tile {
+    /// A screen someone shares, or a camera we have no person for.
+    Video(gtk::Widget),
+    /// Someone in the call.
+    Person(PersonTile),
+}
+
+impl Tile {
+    fn widget(&self) -> &gtk::Widget {
+        match self {
+            Self::Video(widget) => widget,
+            Self::Person(tile) => tile.widget(),
+        }
+    }
+}
 
 mod imp {
     use std::{
@@ -37,8 +55,8 @@ mod imp {
         action_button: OnceCell<gtk::Button>,
         videos_revealer: OnceCell<gtk::Revealer>,
         videos_box: OnceCell<gtk::Box>,
-        /// The video tiles we show, by video ID.
-        tiles: RefCell<HashMap<String, gtk::Widget>>,
+        /// The tiles we show, by key.
+        tiles: RefCell<HashMap<String, Tile>>,
         /// The windows showing a video big, by video ID.
         windows: RefCell<HashMap<String, gtk::Window>>,
         /// The session we watch, with its handler.
@@ -286,7 +304,12 @@ mod imp {
                 handlers.push(call.connect_videos_changed(clone!(
                     #[weak(rename_to = imp)]
                     self,
-                    move |_| imp.update_videos()
+                    move |_| imp.update_tiles()
+                )));
+                handlers.push(call.connect_people_changed(clone!(
+                    #[weak(rename_to = imp)]
+                    self,
+                    move |_| imp.update_tiles()
                 )));
                 handlers.push(call.connect_heard_changed(clone!(
                     #[weak(rename_to = imp)]
@@ -330,11 +353,12 @@ mod imp {
                 }
                 self.call.replace(Some((call, handlers)));
             }
-            self.update_videos();
+            self.update_tiles();
         }
 
-        /// Show the current videos of the call.
-        fn update_videos(&self) {
+        /// Show a tile for each person in the call, with their camera when it
+        /// is on, and one for each shared screen.
+        fn update_tiles(&self) {
             let (Some(videos_box), Some(videos_revealer)) =
                 (self.videos_box.get(), self.videos_revealer.get())
             else {
@@ -342,63 +366,141 @@ mod imp {
             };
             let call = self.call.borrow().as_ref().map(|(call, _)| call.clone());
             let room = self.room.borrow().clone();
-            let videos = match (&call, &room) {
-                (Some(call), Some(_)) => call.videos(),
-                _ => Vec::new(),
+            let (videos, mut people) = match (&call, &room) {
+                (Some(call), Some(_)) => (call.videos(), call.people()),
+                _ => (Vec::new(), Vec::new()),
             };
+            let own_user_id = room
+                .as_ref()
+                .and_then(Room::session)
+                .map(|session| session.user_id().clone());
+            let is_own = |person: &CallPerson| own_user_id.as_ref() == Some(&person.user_id);
+            // Us first, then the others in the order of the call.
+            people.sort_by_key(|person| !is_own(person));
 
-            // Remove the tiles and windows of videos that are gone.
-            let ids = videos
+            // The tiles to show, in order: screens, people, then cameras of
+            // nobody we know, like our other devices.
+            let mut wanted = Vec::<(String, Option<&CallPerson>, Option<&Video>)>::new();
+            for video in videos
                 .iter()
-                .map(|video| video.id.clone())
+                .filter(|video| video.kind == VideoKind::Screen)
+            {
+                wanted.push((format!("video:{}", video.id), None, Some(video)));
+            }
+            let mut cameras_shown = std::collections::HashSet::new();
+            for person in &people {
+                let own = is_own(person);
+                let camera = videos.iter().find(|video| {
+                    video.kind == VideoKind::Camera
+                        && video.local == own
+                        && video.user_id == person.user_id
+                });
+                if let Some(camera) = camera {
+                    cameras_shown.insert(camera.id.clone());
+                }
+                let key = format!(
+                    "person:{}:{}",
+                    person.user_id,
+                    camera.map_or("", |video| video.id.as_str())
+                );
+                wanted.push((key, Some(person), camera));
+            }
+            for video in videos.iter().filter(|video| {
+                video.kind == VideoKind::Camera && !cameras_shown.contains(&video.id)
+            }) {
+                wanted.push((format!("video:{}", video.id), None, Some(video)));
+            }
+
+            // Remove the tiles that are gone, and the windows of videos that
+            // are gone.
+            let keys = wanted
+                .iter()
+                .map(|(key, ..)| key.clone())
                 .collect::<std::collections::HashSet<_>>();
-            self.tiles.borrow_mut().retain(|id, tile| {
-                let keep = ids.contains(id);
+            self.tiles.borrow_mut().retain(|key, tile| {
+                let keep = keys.contains(key);
                 if !keep {
-                    videos_box.remove(tile);
+                    videos_box.remove(tile.widget());
                 }
                 keep
             });
+            let video_ids = videos
+                .iter()
+                .map(|video| video.id.clone())
+                .collect::<std::collections::HashSet<_>>();
             // Closing a window removes it from the map, so don't hold the map.
             let closed = self
                 .windows
                 .borrow()
                 .iter()
-                .filter(|(id, _)| !ids.contains(*id))
+                .filter(|(id, _)| !video_ids.contains(*id))
                 .map(|(_, window)| window.clone())
                 .collect::<Vec<_>>();
             for window in closed {
                 window.close();
             }
 
-            // Add tiles for new videos, keeping the order of the call.
+            // Add the new tiles, keeping the order.
             let mut previous: Option<gtk::Widget> = None;
-            for video in &videos {
+            for (key, person, video) in &wanted {
                 let Some(room) = &room else {
                     break;
                 };
-                let existing = self.tiles.borrow().get(&video.id).cloned();
-                let tile = existing.unwrap_or_else(|| {
-                    let title = call_video::video_title(room, video);
-                    let new_tile = call_video::tile(&title, video, {
-                        let video = video.clone();
-                        let title = title.clone();
-                        clone!(
-                            #[weak(rename_to = imp)]
-                            self,
-                            move || imp.open_video(&title, &video)
-                        )
-                    });
-                    videos_box.append(&new_tile);
-                    self.tiles
-                        .borrow_mut()
-                        .insert(video.id.clone(), new_tile.clone());
-                    new_tile
+                let existing = self
+                    .tiles
+                    .borrow()
+                    .get(key)
+                    .map(|tile| tile.widget().clone());
+                let widget = existing.unwrap_or_else(|| {
+                    let tile = self.new_tile(room, *person, *video, own_user_id.as_ref());
+                    let widget = tile.widget().clone();
+                    videos_box.append(&widget);
+                    self.tiles.borrow_mut().insert(key.clone(), tile);
+                    widget
                 });
-                videos_box.reorder_child_after(&tile, previous.as_ref());
-                previous = Some(tile);
+                videos_box.reorder_child_after(&widget, previous.as_ref());
+                previous = Some(widget);
+
+                if let Some(person) = person
+                    && let Some(Tile::Person(tile)) = self.tiles.borrow().get(key)
+                {
+                    tile.update(person.speaking, person.muted);
+                }
             }
-            videos_revealer.set_reveal_child(!videos.is_empty());
+            videos_revealer.set_reveal_child(!wanted.is_empty());
+        }
+
+        /// Create the tile of a person, with their camera if it is on, or of a
+        /// video.
+        fn new_tile(
+            &self,
+            room: &Room,
+            person: Option<&CallPerson>,
+            video: Option<&Video>,
+            own_user_id: Option<&ruma::OwnedUserId>,
+        ) -> Tile {
+            let open = |video: &Video| -> call_video::OnOpen {
+                let title = call_video::video_title(room, video);
+                let video = video.clone();
+                Box::new(clone!(
+                    #[weak(rename_to = imp)]
+                    self,
+                    move || imp.open_video(&title, &video)
+                ))
+            };
+            match (person, video) {
+                (Some(person), camera) => Tile::Person(PersonTile::new(
+                    room,
+                    &person.user_id,
+                    own_user_id == Some(&person.user_id),
+                    camera.map(|video| (video, open(video))),
+                )),
+                (None, Some(video)) => {
+                    let title = call_video::video_title(room, video);
+                    Tile::Video(call_video::tile(&title, video, open(video)))
+                }
+                (None, None) => unreachable!("a tile is for a person or a video"),
+            }
         }
 
         /// Show a video big in its own window, or raise its window.

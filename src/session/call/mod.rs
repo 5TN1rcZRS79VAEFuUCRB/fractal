@@ -42,6 +42,16 @@ pub(crate) struct HeardPerson {
     pub stream: bool,
 }
 
+/// Someone in a call, us included.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CallPerson {
+    pub user_id: OwnedUserId,
+    /// Whether they are speaking right now.
+    pub speaking: bool,
+    /// Whether their microphone is muted, or not sent at all.
+    pub muted: bool,
+}
+
 /// Whether to send test patterns instead of the camera and screen.
 ///
 /// For testing calls on machines without a camera or screen sharing portal.
@@ -136,6 +146,8 @@ mod imp {
         pub(super) videos: RefCell<Vec<Video>>,
         /// The other people we hear in the call.
         pub(super) heard: RefCell<Vec<HeardPerson>>,
+        /// The people in the call, us included.
+        pub(super) people: RefCell<Vec<CallPerson>>,
         /// The channel to send commands to the call task.
         pub(super) commands: RefCell<Option<mpsc::UnboundedSender<Command>>>,
     }
@@ -163,6 +175,9 @@ mod imp {
                     Signal::builder("videos-changed").build(),
                     // The people we hear in the call changed.
                     Signal::builder("heard-changed").build(),
+                    // The people in the call, or whether they speak or are
+                    // muted, changed.
+                    Signal::builder("people-changed").build(),
                 ]
             });
             SIGNALS.as_ref()
@@ -215,6 +230,19 @@ mod imp {
                     if *self.speaking.borrow() != speaking {
                         self.speaking.replace(speaking);
                         obj.notify_speaking();
+                    }
+
+                    let people = participants
+                        .iter()
+                        .map(|participant| CallPerson {
+                            user_id: participant.user_id.clone(),
+                            speaking: participant.speaking,
+                            muted: participant.muted,
+                        })
+                        .collect::<Vec<_>>();
+                    if *self.people.borrow() != people {
+                        self.people.replace(people);
+                        obj.emit_by_name::<()>("people-changed", &[]);
                     }
 
                     // Only the sound of other devices is played, ours too when we are in the
@@ -431,6 +459,24 @@ impl Call {
     ) -> glib::SignalHandlerId {
         self.connect_closure(
             "heard-changed",
+            true,
+            glib::closure_local!(move |obj: Self| f(&obj)),
+        )
+    }
+
+    /// The people in the call, us included.
+    pub(crate) fn people(&self) -> Vec<CallPerson> {
+        self.imp().people.borrow().clone()
+    }
+
+    /// Connect to the signal emitted when the people in the call, or whether
+    /// they speak or are muted, change.
+    pub(crate) fn connect_people_changed<F: Fn(&Self) + 'static>(
+        &self,
+        f: F,
+    ) -> glib::SignalHandlerId {
+        self.connect_closure(
+            "people-changed",
             true,
             glib::closure_local!(move |obj: Self| f(&obj)),
         )
