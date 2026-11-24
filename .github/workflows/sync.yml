@@ -1,0 +1,105 @@
+name: Sync with Fractal
+
+# Merge Fractal's main branch into ours every day. When it merges cleanly,
+# push the merge and start the builds, which publish it like any push. When it
+# doesn't, open an issue listing the conflicts, to resolve them by hand. Also
+# open an issue when Fractal changes its Flatpak manifest, because ours
+# doesn't follow it by itself.
+on:
+  schedule:
+    - cron: "17 5 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}
+
+env:
+  UPSTREAM: https://gitlab.gnome.org/World/fractal.git
+  UPSTREAM_MANIFEST: build-aux/org.gnome.Fractal.Devel.json
+  CONFLICT_TITLE: Fractal doesn't merge cleanly
+  MANIFEST_TITLE: Fractal changed its Flatpak manifest
+  GH_TOKEN: ${{ github.token }}
+
+jobs:
+  sync:
+    name: Merge Fractal
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+      actions: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Merge Fractal
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream "$UPSTREAM"
+          git fetch --no-tags upstream main
+
+          # The number of the open issue with this title, if any.
+          issue() {
+            gh issue list --state open --limit 200 --json number,title \
+              --jq "map(select(.title == \"$1\")) | .[0].number // empty"
+          }
+          # Open an issue with this title and the body in this file, or update
+          # the one that is open, so a problem that stays is one issue.
+          report() {
+            number=$(issue "$1")
+            if [ -n "$number" ]; then
+              gh issue edit "$number" --body-file "$2"
+            else
+              gh issue create --title "$1" --body-file "$2"
+            fi
+          }
+
+          if git merge-base --is-ancestor upstream/main HEAD; then
+            echo "Already up to date with Fractal."
+            exit 0
+          fi
+          base=$(git merge-base HEAD upstream/main)
+          upstream=$(git rev-parse --short upstream/main)
+          count=$(git rev-list --count HEAD..upstream/main)
+
+          if ! git diff --quiet "$base" upstream/main -- "$UPSTREAM_MANIFEST"; then
+            git diff "$base" upstream/main -- "$UPSTREAM_MANIFEST" > manifest.diff
+            {
+              echo "Fractal changed \`$UPSTREAM_MANIFEST\`. Ours, in \`build-aux/\`, doesn't"
+              echo "follow it by itself: copy what applies, like a newer GNOME runtime (also the"
+              echo "container image in \`.github/workflows/flatpak.yml\`) or newer modules."
+              echo
+              git log --format='- %h %s' "$base"..upstream/main -- "$UPSTREAM_MANIFEST"
+              echo
+              echo '```diff'
+              head -c 50000 manifest.diff
+              echo '```'
+            } > manifest.md
+            report "$MANIFEST_TITLE" manifest.md
+          fi
+
+          if git merge --no-edit -m "Merge Fractal up to $upstream" upstream/main; then
+            git push origin HEAD:main
+            # A push with this workflow's token starts no workflows, so start
+            # the builds here.
+            gh workflow run flatpak.yml --ref main
+            gh workflow run desktop.yml --ref main
+            number=$(issue "$CONFLICT_TITLE")
+            if [ -n "$number" ]; then
+              gh issue close "$number" --comment "Fractal merged cleanly in $(git rev-parse --short HEAD)."
+            fi
+          else
+            conflicts=$(git diff --name-only --diff-filter=U)
+            git merge --abort
+            {
+              echo "Merging Fractal up to $upstream ($count commits) into main conflicts in:"
+              echo
+              echo "$conflicts" | sed 's/.*/- `&`/'
+              echo
+              echo "Merge \`upstream/main\` by hand and push. This issue closes on the next clean merge."
+            } > conflict.md
+            report "$CONFLICT_TITLE" conflict.md
+          fi
