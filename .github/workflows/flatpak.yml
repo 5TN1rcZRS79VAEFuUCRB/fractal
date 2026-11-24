@@ -1,18 +1,13 @@
 name: Flatpak
 
-# Build the Flatpak. For tags, also publish it to our Flatpak repository on
-# GitHub Pages, so installs get updates, and attach a bundle to the release.
+# Build the Flatpak and publish it to our Flatpak repository on GitHub Pages,
+# so installs get every push to main. For tags, also attach a bundle to the
+# release.
 on:
   push:
     branches: [main]
     tags: ["v*"]
   workflow_dispatch:
-
-# A newer push replaces a build still running for the same branch, but
-# never for a tag.
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 env:
   APP_ID: io.github._5TN1rcZRS79VAEFuUCRB.FractalPlus
@@ -23,6 +18,11 @@ jobs:
   flatpak:
     name: Build Flatpak
     runs-on: ubuntu-latest
+    # A newer push replaces a build still running for the same branch, but
+    # never for a tag.
+    concurrency:
+      group: ${{ github.workflow }}-build-${{ github.ref }}
+      cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
     permissions:
       contents: write
     container:
@@ -60,7 +60,6 @@ jobs:
           path: fractalplus.flatpak
 
       - name: Prepare the website
-        if: startsWith(github.ref, 'refs/tags/')
         run: |
           mkdir site
           cp -r repo site/repo
@@ -68,7 +67,6 @@ jobs:
             build-aux/repo/fractalplus.gpg build-aux/repo/index.html site/
 
       - uses: actions/upload-pages-artifact@v3
-        if: startsWith(github.ref, 'refs/tags/')
         with:
           path: site
 
@@ -84,9 +82,14 @@ jobs:
 
   pages:
     name: Publish the Flatpak repository
-    if: startsWith(github.ref, 'refs/tags/')
     needs: flatpak
     runs-on: ubuntu-latest
+    # One publish at a time, and a publish that has started is never cancelled,
+    # so a newer push can't leave the repository half deployed. A newer one
+    # waiting replaces an older one waiting.
+    concurrency:
+      group: ${{ github.workflow }}-pages
+      cancel-in-progress: false
     permissions:
       pages: write
       id-token: write
