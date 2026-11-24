@@ -93,7 +93,8 @@
             "build-options": {
                 "env": {
                     "LK_CUSTOM_WEBRTC": "/run/build/fractalplus/webrtc-prebuilt",
-                    "CARGO_PROFILE_RELEASE_DEBUG": "false"
+                    "CARGO_PROFILE_RELEASE_DEBUG": "false",
+                    "CARGO_PROFILE_RELEASE_CODEGEN_UNITS": "16"
                 }
             },
             "sources": [

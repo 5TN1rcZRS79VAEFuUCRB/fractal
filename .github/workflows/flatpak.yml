@@ -17,7 +17,10 @@ env:
 jobs:
   flatpak:
     name: Build Flatpak
-    runs-on: ubuntu-latest
+    # Our own machine, much faster than GitHub's. Jobs wait for it when it is
+    # off. Only pushes to this repository run workflows there: pull requests
+    # from forks need approval.
+    runs-on: [self-hosted, flatpak]
     # A newer push replaces a build still running for the same branch, but
     # never for a tag.
     concurrency:
@@ -27,7 +30,8 @@ jobs:
       contents: write
     container:
       image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-50
-      options: --privileged
+      # Lower priority than the machine's other work, when it is busy.
+      options: --privileged --cpu-shares=256
     steps:
       - uses: actions/checkout@v4
 
@@ -43,7 +47,9 @@ jobs:
           build-bundle: false
           upload-artifact: false
           gpg-sign: ${{ env.GPG_FINGERPRINT }}
-          cache-key: flatpak-builder-${{ github.sha }}
+          # The cache would be uploaded to GitHub, which takes longer than
+          # building what it saves on our machine.
+          cache: false
 
       - name: Sign the repository and build the bundle
         run: |
